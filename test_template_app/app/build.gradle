@@ -8,7 +8,7 @@ android {
 
     defaultConfig {
         applicationId "com.ratadroid.test_template_app"
-        minSdk 24
+        minSdk 29
         targetSdk 36
         versionCode 1
         versionName "1.0"
@@ -33,22 +33,22 @@ android {
 }
 
 // Task to build Rust library
-task buildRust(type: Exec) {
+tasks.register('buildRust', Exec) {
     workingDir '../rust'
     commandLine 'cargo', 'ndk', '-t', 'arm64-v8a', '-t', 'armeabi-v7a', '-t', 'x86', '-t', 'x86_64', 'build', '--release'
     doLast {
         // Copy native libraries to the correct jniLibs structure
         def jniLibsDir = file("src/main/jniLibs")
         jniLibsDir.mkdirs()
-        
+
         // Map cargo-ndk output to Android ABI directories
         def abiMap = [
-            'aarch64-linux-android': 'arm64-v8a',
-            'armv7-linux-androideabi': 'armeabi-v7a',
-            'i686-linux-android': 'x86',
-            'x86_64-linux-android': 'x86_64'
+                'aarch64-linux-android'  : 'arm64-v8a',
+                'armv7-linux-androideabi': 'armeabi-v7a',
+                'i686-linux-android'     : 'x86',
+                'x86_64-linux-android'   : 'x86_64'
         ]
-        
+
         abiMap.each { cargoTarget, androidAbi ->
             def sourceLib = file("../rust/target/${cargoTarget}/release/libratadroid.so")
             if (sourceLib.exists()) {
@@ -65,13 +65,29 @@ task buildRust(type: Exec) {
 }
 
 // Make Rust build run before Android build
-tasks.whenTaskAdded { task ->
+tasks.configureEach { task ->
     if (task.name == 'mergeDebugJniLibFolders' || task.name == 'mergeReleaseJniLibFolders') {
         task.dependsOn 'buildRust'
     }
 }
 
+configurations.all {
+    resolutionStrategy {
+        force 'org.jetbrains.kotlin:kotlin-stdlib:1.8.22'
+        force 'org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22'
+        force 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22'
+    }
+}
+
 dependencies {
-    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'androidx.appcompat:appcompat:1.7.1'
+    
+    // Force consistent Kotlin stdlib versions to avoid duplicate class errors
+    implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.8.22'
+}
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
 }
 

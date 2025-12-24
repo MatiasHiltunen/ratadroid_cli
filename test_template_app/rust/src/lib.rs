@@ -21,17 +21,17 @@ use android_logger::Config;
 #[cfg(target_os = "android")]
 use log::{info, warn};
 #[cfg(target_os = "android")]
+use jni::objects::JObject;
+#[cfg(target_os = "android")]
+use jni::sys::jobject;
+#[cfg(target_os = "android")]
+use ndk_context;
+#[cfg(target_os = "android")]
 use ndk::native_window::NativeWindow;
 #[cfg(target_os = "android")]
 use ndk_sys::ANativeWindow_setBuffersGeometry;
 #[cfg(target_os = "android")]
-use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Margin},
-    style::{Color, Modifier, Style},
-    text::Line,
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
-    Terminal,
-};
+use ratatui::Terminal;
 #[cfg(target_os = "android")]
 use std::time::Duration;
 
@@ -60,14 +60,31 @@ struct AppState {
     orientation: Orientation, // Current screen orientation
 }
 
+// Note: We no longer need to store ANativeActivity pointers
+// ndk-context provides access to the activity context when needed
+
 /// Android NativeActivity entry point
 /// android-activity crate with "native-activity" feature bridges ANativeActivity_onCreate
 /// to this function automatically
 #[cfg(target_os = "android")]
 #[no_mangle]
+#[allow(improper_ctypes_definitions)]
 pub extern "C" fn android_main(app: AndroidApp) {
     android_logger::init_once(Config::default().with_max_level(log::LevelFilter::Info));
     info!("Ratatui Android Runtime starting");
+    
+    // Try to initialize ndk-context early - it needs to be initialized before use
+    // This allows us to access the activity context for JNI calls
+    #[cfg(target_os = "android")]
+    {
+        let _ctx_result = std::panic::catch_unwind(|| {
+            let _ctx = ndk_context::android_context();
+            info!("ndk-context initialized successfully");
+        });
+        if _ctx_result.is_err() {
+            warn!("ndk-context initialization failed - keyboard support may be limited");
+        }
+    }
 
     // Initialize Rasterizer with embedded font
     let rasterizer = match rasterizer::Rasterizer::new(FONT_DATA, FONT_SIZE) {
@@ -85,12 +102,16 @@ pub extern "C" fn android_main(app: AndroidApp) {
     // Initialize Ratatui backend with dummy size (will resize on window init)
     let backend = backend::AndroidBackend::new(1, 1);
     let mut input_state = input::InputState::new();
+    let mut todo_app = todo_app::TodoApp::new();
+    #[cfg(target_os = "android")]
+    todo_app.set_android_app(&app);
+    
     let mut state = AppState {
         terminal: Terminal::new(backend).unwrap(),
         rasterizer,
         should_quit: false,
         native_window: None,
-        todo_app: todo_app::TodoApp::new(),
+        todo_app,
         top_offset_rows: 2, // Default: skip 2 rows at top for status bar
         orientation: Orientation::Portrait, // Default orientation
     };
@@ -170,7 +191,209 @@ pub extern "C" fn android_main(app: AndroidApp) {
         }
     }
     
-    info!("Ratatui Android Runtime exiting");
+            info!("Ratatui Android Runtime exiting");
+        }
+
+/// Show the Android soft keyboard by calling Java method via JNI
+/// Uses ndk-context to get activity object (works with android-activity)
+/// Wrapped in panic handler to prevent crashes when called from input event handler
+#[cfg(target_os = "android")]
+fn show_soft_keyboard(_app: &AndroidApp) {
+    info!("show_soft_keyboard() called - attempting to show keyboard");
+    
+    // Wrap in panic handler to prevent crashes if ndk-context isn't initialized
+    // This can happen when called from input event handler threads
+    let result = std::panic::catch_unwind(|| {
+        // Use ndk-context to get the activity context
+        // This works with android-activity without requiring ndk-glue
+        // Note: android_context() returns AndroidContext directly, not Option
+        let ctx = match std::panic::catch_unwind(|| ndk_context::android_context()) {
+            Ok(ctx) => ctx,
+            Err(_) => {
+                warn!("ndk-context::android_context() panicked - trying ndk-glue fallback");
+                // Fallback: try ndk-glue if available
+                return try_show_keyboard_with_ndk_glue();
+            }
+        };
+        
+        info!("Got Android context from ndk-context");
+        
+        // Get Java VM and activity object from context
+        // Note: ndk-context 0.1 API uses vm() and context() methods
+        let vm_ptr = ctx.vm();
+        let activity_obj = ctx.context();
+        
+        if vm_ptr.is_null() {
+            warn!("Java VM is null from ndk-context");
+            return;
+        }
+        
+        if activity_obj.is_null() {
+            warn!("Activity object is null from ndk-context");
+            return;
+        }
+        
+        info!("Got Java VM and activity object from ndk-context");
+        
+        unsafe {
+            // Attach to Java VM
+            let vm = match jni::JavaVM::from_raw(vm_ptr as *mut _) {
+                Ok(vm) => vm,
+                Err(e) => {
+                    warn!("Failed to create JavaVM: {:?}", e);
+                    return;
+                }
+            };
+            info!("Created JavaVM from raw pointer");
+            
+            let mut env = match vm.attach_current_thread_permanently() {
+                Ok(env) => env,
+                Err(e) => {
+                    warn!("Failed to attach to Java VM: {:?}", e);
+                    return;
+                }
+            };
+            info!("Attached to Java VM thread");
+            
+            let activity_jobj = JObject::from_raw(activity_obj as jobject);
+            info!("Created JObject from activity pointer");
+            
+            // Call showSoftKeyboard() method on NativeActivity
+            info!("Calling showSoftKeyboard() method");
+            match env.call_method(
+                activity_jobj,
+                "showSoftKeyboard",
+                "()V",
+                &[]
+            ) {
+                Ok(_) => {
+                    info!("Soft keyboard shown successfully via Java method");
+                }
+                Err(e) => {
+                    warn!("Failed to call showSoftKeyboard: {:?}", e);
+                    // Try to get more details about the error
+                    if env.exception_check().unwrap_or(false) {
+                        if let Err(detail_err) = env.exception_describe() {
+                            warn!("Also failed to describe exception: {:?}", detail_err);
+                        }
+                        env.exception_clear().ok();
+                    }
+                }
+            }
+        }
+    });
+    
+    match result {
+        Ok(()) => {
+            info!("show_soft_keyboard completed successfully");
+        }
+        Err(_) => {
+            warn!("show_soft_keyboard panicked - trying ndk-glue fallback");
+            try_show_keyboard_with_ndk_glue();
+        }
+    }
+}
+
+/// Fallback method to show keyboard using ndk-glue if ndk-context fails
+#[cfg(target_os = "android")]
+fn try_show_keyboard_with_ndk_glue() {
+    let result = std::panic::catch_unwind(|| {
+        let native_activity = ndk_glue::native_activity();
+        let vm = native_activity.vm();
+        let activity_obj = native_activity.activity();
+        
+        if vm.is_null() || activity_obj.is_null() {
+            warn!("ndk-glue: Java VM or activity object is null");
+            return;
+        }
+        
+        info!("Got Java VM and activity from ndk-glue");
+        
+        unsafe {
+            let vm = match jni::JavaVM::from_raw(vm as *mut _) {
+                Ok(vm) => vm,
+                Err(e) => {
+                    warn!("Failed to create JavaVM from ndk-glue: {:?}", e);
+                    return;
+                }
+            };
+            
+            let mut env = match vm.attach_current_thread_permanently() {
+                Ok(env) => env,
+                Err(e) => {
+                    warn!("Failed to attach to Java VM from ndk-glue: {:?}", e);
+                    return;
+                }
+            };
+            
+            let activity_jobj = JObject::from_raw(activity_obj as jobject);
+            
+            match env.call_method(activity_jobj, "showSoftKeyboard", "()V", &[]) {
+                Ok(_) => {
+                    info!("Soft keyboard shown successfully via ndk-glue fallback");
+                }
+                Err(e) => {
+                    warn!("Failed to call showSoftKeyboard via ndk-glue: {:?}", e);
+                    if env.exception_check().unwrap_or(false) {
+                        env.exception_clear().ok();
+                    }
+                }
+            }
+        }
+    });
+    
+    if result.is_err() {
+        warn!("ndk-glue fallback also failed - keyboard cannot be shown");
+    }
+}
+
+/// Hide the Android soft keyboard by calling Java method via JNI
+/// Uses ndk-context to get activity object (works with android-activity)
+/// Wrapped in panic handler to prevent crashes when called from input event handler
+#[cfg(target_os = "android")]
+fn hide_soft_keyboard(_app: &AndroidApp) {
+    info!("hide_soft_keyboard() called - attempting to hide keyboard");
+    
+    // Wrap in panic handler to prevent crashes if ndk-context isn't initialized
+    let _result = std::panic::catch_unwind(|| {
+        // Use ndk-context to get the activity context
+        // Note: android_context() returns AndroidContext directly, not Option
+        let ctx = ndk_context::android_context();
+        
+        let vm_ptr = ctx.vm();
+        let activity_obj = ctx.context();
+        
+        if vm_ptr.is_null() || activity_obj.is_null() {
+            warn!("Java VM or activity object is null from ndk-context");
+            return;
+        }
+        
+        unsafe {
+            let vm = match jni::JavaVM::from_raw(vm_ptr as *mut _) {
+                Ok(vm) => vm,
+                Err(e) => {
+                    warn!("Failed to create JavaVM: {:?}", e);
+                    return;
+                }
+            };
+            
+            let _env = match vm.attach_current_thread_permanently() {
+                Ok(env) => env,
+                Err(e) => {
+                    warn!("Failed to attach to Java VM: {:?}", e);
+                    return;
+                }
+            };
+            
+            let _activity_jobj = JObject::from_raw(activity_obj as jobject);
+            
+            // For now, just log that we're trying to hide the keyboard
+            // A full implementation would use InputMethodManager to hide it
+            info!("Attempted to hide soft keyboard");
+        }
+    });
+    
+    // Ignore panic result - non-fatal
 }
 
 #[cfg(target_os = "android")]

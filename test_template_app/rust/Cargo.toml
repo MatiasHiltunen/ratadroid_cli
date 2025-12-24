@@ -19,4 +19,7 @@ log = "0.4"
 ab_glyph = "0.2"
 crossterm = "0.27"
 tui-textarea = "0.6"
+jni = "0.21"
+ndk-glue = "0.5"
+ndk-context = "0.1.1"
 

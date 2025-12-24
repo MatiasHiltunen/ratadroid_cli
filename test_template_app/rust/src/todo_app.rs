@@ -10,8 +10,12 @@ use ratatui::{
 };
 use tui_textarea::{Input, Key, TextArea};
 
+#[cfg(target_os = "android")]
+use android_activity::AndroidApp;
+
 #[derive(Clone, Debug)]
 pub struct Todo {
+    #[allow(dead_code)] // May be useful for future features or debugging
     pub id: usize,
     pub text: String,
     pub completed: bool,
@@ -31,6 +35,8 @@ pub struct TodoApp {
     pub button_focused: usize, // Index of focused button (0 = Add, 1 = Delete, 2 = Toggle)
     pub button_clicked: Option<usize>, // Index of clicked button (for visual feedback)
     list_state: ratatui::widgets::ListState,
+    #[cfg(target_os = "android")]
+    android_app: Option<*const AndroidApp>, // Store AndroidApp reference for keyboard control
 }
 
 impl TodoApp {
@@ -74,6 +80,39 @@ impl TodoApp {
                 state.select(Some(0));
                 state
             },
+            #[cfg(target_os = "android")]
+            android_app: None,
+        }
+    }
+    
+    #[cfg(target_os = "android")]
+    pub fn set_android_app(&mut self, app: &AndroidApp) {
+        self.android_app = Some(app as *const AndroidApp);
+    }
+    
+    #[cfg(target_os = "android")]
+    fn show_keyboard(&self) {
+        log::info!("TodoApp::show_keyboard() called");
+        if let Some(app_ptr) = self.android_app {
+            unsafe {
+                let app = &*app_ptr;
+                super::show_soft_keyboard(app);
+            }
+        } else {
+            log::warn!("AndroidApp reference is None, cannot show keyboard");
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    fn hide_keyboard(&self) {
+        log::info!("TodoApp::hide_keyboard() called");
+        if let Some(app_ptr) = self.android_app {
+            unsafe {
+                let app = &*app_ptr;
+                super::hide_soft_keyboard(app);
+            }
+        } else {
+            log::warn!("AndroidApp reference is None, cannot hide keyboard");
         }
     }
 
@@ -98,6 +137,8 @@ impl TodoApp {
                     }) => {
                         self.input_mode = InputMode::Insert;
                         self.textarea = TextArea::default(); // Reset textarea
+                        #[cfg(target_os = "android")]
+                        self.show_keyboard();
                     }
             Event::Key(KeyEvent {
                 code: KeyCode::Char('d'),
@@ -176,6 +217,8 @@ impl TodoApp {
                 // Add button - enter insert mode
                 self.input_mode = InputMode::Insert;
                 self.textarea = TextArea::default(); // Reset textarea
+                #[cfg(target_os = "android")]
+                self.show_keyboard();
             }
             1 => {
                 // Delete button - delete selected todo
@@ -225,19 +268,25 @@ impl TodoApp {
         if let Some(input) = textarea_input {
             // Handle Esc or Back button to exit insert mode (discard changes)
             if input.key == Key::Esc {
+                log::info!("Esc pressed - exiting insert mode");
                 self.textarea = TextArea::default(); // Reset textarea
                 self.input_mode = InputMode::Normal;
+                #[cfg(target_os = "android")]
+                self.hide_keyboard();
                 return false;
             }
             
             // Handle Enter to confirm and add todo
             if input.key == Key::Enter && !input.ctrl && !input.alt {
+                log::info!("Enter pressed in insert mode - adding todo");
                 let text = self.textarea.lines().join("\n").trim().to_string();
                 if !text.is_empty() {
                     self.add_todo();
                 }
                 self.textarea = TextArea::default(); // Reset textarea
                 self.input_mode = InputMode::Normal;
+                #[cfg(target_os = "android")]
+                self.hide_keyboard();
                 return false;
             }
             
@@ -363,11 +412,45 @@ impl TodoApp {
                     ])
                     .split(chunks[1]);
                 
-                // Render the textarea widget
+                // Render the textarea widget with cursor
                 // Note: tui-textarea widget() method has version compatibility issues with ratatui 0.26
                 // For now, render as Paragraph but still use TextArea for input handling
                 let text = self.textarea.lines().join("\n");
-                let textarea_widget = Paragraph::new(text)
+                let cursor_pos = self.textarea.cursor();
+                
+                // Create text with cursor indicator
+                let mut display_lines: Vec<Line> = text
+                    .lines()
+                    .enumerate()
+                    .map(|(line_idx, line_text)| {
+                        if line_idx == cursor_pos.0 {
+                            // This is the line with the cursor
+                            // Split the line at cursor position and insert cursor character
+                            let cursor_col = cursor_pos.1.min(line_text.len());
+                            let before_cursor = &line_text[..cursor_col];
+                            let after_cursor = &line_text[cursor_col..];
+                            
+                            Line::from(vec![
+                                Span::styled(before_cursor, Style::default().fg(Color::White).bg(Color::Black)),
+                                Span::styled("█", Style::default().fg(Color::Black).bg(Color::White)), // Cursor
+                                Span::styled(after_cursor, Style::default().fg(Color::White).bg(Color::Black)),
+                            ])
+                        } else {
+                            Line::from(vec![
+                                Span::styled(line_text, Style::default().fg(Color::White).bg(Color::Black))
+                            ])
+                        }
+                    })
+                    .collect();
+                
+                // If cursor is on a new line (beyond existing lines), add it
+                if cursor_pos.0 >= display_lines.len() {
+                    display_lines.push(Line::from(vec![
+                        Span::styled("█", Style::default().fg(Color::Black).bg(Color::White))
+                    ]));
+                }
+                
+                let textarea_widget = Paragraph::new(display_lines)
                     .block(Block::default().borders(Borders::ALL).title("New Todo (Type here)"))
                     .style(Style::default().fg(Color::White).bg(Color::Black))
                     .wrap(ratatui::widgets::Wrap { trim: false });
@@ -488,8 +571,10 @@ impl TodoApp {
                 self.input_mode = InputMode::Normal;
                 return true;
             }
-            // Click inside textarea - let textarea handle it (for now, do nothing)
-            return false;
+            // Click inside textarea - show keyboard
+            #[cfg(target_os = "android")]
+            self.show_keyboard();
+            return true;
         }
         
         // Normal mode - handle button clicks and todo selection
@@ -556,7 +641,8 @@ impl TodoApp {
         false
     }
 
-    pub fn render(&self, _area: Rect) -> Vec<Line> {
+    #[allow(dead_code)]
+    pub fn render(&self, _area: Rect) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
 
         // Title

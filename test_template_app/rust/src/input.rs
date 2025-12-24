@@ -118,12 +118,12 @@ fn map_key_code_with_character_map(
             // Physical keyboards use AltGr (Right Alt) which sends Alt+key combinations
             // Based on user feedback: Alt+P = ä, Alt+Q = å, Alt+W = ö
             let scandinavian_char = match (key_code, meta_state.shift_on()) {
-                (Keycode::P, false) => Some('ö'),
-                (Keycode::P, true) => Some('Ö'),
-                (Keycode::Q, false) => Some('ä'),
-                (Keycode::Q, true) => Some('Ä'),
-                (Keycode::W, false) => Some('å'),
-                (Keycode::W, true) => Some('Å'),
+                (Keycode::P, false) => Some('ä'),
+                (Keycode::P, true) => Some('Ä'),
+                (Keycode::Q, false) => Some('å'),
+                (Keycode::Q, true) => Some('Å'),
+                (Keycode::W, false) => Some('ö'),
+                (Keycode::W, true) => Some('Ö'),
                 // Additional Finnish keyboard mappings if needed
                 (Keycode::A, false) if meta_state.alt_on() => Some('ä'), // Some layouts
                 (Keycode::A, true) if meta_state.alt_on() => Some('Ä'),
@@ -224,7 +224,10 @@ fn map_key_code_with_character_map(
     // This provides fallback support if KeyCharacterMap doesn't work
     let code = match key_code {
         // Special keys
-        Keycode::Enter => KeyCode::Enter,
+        Keycode::Enter => {
+            log::info!("Enter key pressed (keycode: {:?})", key_code);
+            KeyCode::Enter
+        },
         Keycode::Space => KeyCode::Char(' '),
         Keycode::Del => KeyCode::Backspace,
         Keycode::Escape | Keycode::Back => KeyCode::Esc,
