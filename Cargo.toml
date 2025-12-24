@@ -1,0 +1,23 @@
+[package]
+name = "ratadroid"
+version = "0.1.0"
+# Use the Rust 2024 edition to take advantage of the latest language and tooling features.
+edition = "2024"
+
+[dependencies]
+# Clap provides a declarative CLI API with derive macros.
+clap = { version = "4.2.7", features = ["derive"] }
+# Tokio powers the asynchronous file server used by the `serve` subcommand.
+tokio = { version = "1.37.0", features = ["full"] }
+# Hyper is a lightweight HTTP server library for serving APK files.
+hyper = { version = "0.14.26", features = ["full"] }
+# Walkdir simplifies directory iteration when building the index page.
+walkdir = "2.3"
+# thiserror is used for simple error handling.
+thiserror = "1.0"
+# dirs is used to locate the user's home directory in a cross‑platform way.
+dirs = "5"
+# serde for serialization when needed
+serde = { version = "1.0", features = ["derive"] }
+# serde_json for JSON handling
+serde_json = "1.0"
