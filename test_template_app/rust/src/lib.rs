@@ -40,6 +40,14 @@ use std::time::Duration;
 const FONT_DATA: &[u8] = include_bytes!("../fonts/Hack-Regular.ttf");
 const FONT_SIZE: f32 = 36.0; // Larger text for mobile screens
 
+/// Screen orientation
+#[cfg(target_os = "android")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Orientation {
+    Portrait,
+    Landscape,
+}
+
 /// Application state structure
 #[cfg(target_os = "android")]
 struct AppState {
@@ -49,6 +57,7 @@ struct AppState {
     native_window: Option<NativeWindow>,
     todo_app: todo_app::TodoApp,
     top_offset_rows: u16, // Number of rows to skip at top for status bar
+    orientation: Orientation, // Current screen orientation
 }
 
 /// Android NativeActivity entry point
@@ -83,6 +92,7 @@ pub extern "C" fn android_main(app: AndroidApp) {
         native_window: None,
         todo_app: todo_app::TodoApp::new(),
         top_offset_rows: 2, // Default: skip 2 rows at top for status bar
+        orientation: Orientation::Portrait, // Default orientation
     };
 
     // Main event loop
@@ -90,6 +100,9 @@ pub extern "C" fn android_main(app: AndroidApp) {
         // Poll input events first - this prevents ANR (Application Not Responding)
         if let Ok(mut input_iter) = app.input_events_iter() {
             while input_iter.next(|input_event| {
+                // Calculate top offset in pixels for input coordinate adjustment
+                let top_offset_px = state.top_offset_rows as f32 * state.rasterizer.font_height();
+                
                 // Map Android Input -> TUI Event
                 match input::map_android_event(
                     input_event,
@@ -97,6 +110,7 @@ pub extern "C" fn android_main(app: AndroidApp) {
                     &mut input_state,
                     state.rasterizer.font_width(),
                     state.rasterizer.font_height(),
+                    top_offset_px,
                 ) {
                     Some(tui_event) => {
                         // Handle mouse clicks on buttons
@@ -188,6 +202,17 @@ fn handle_lifecycle(state: &mut AppState, app: &AndroidApp, event: MainEvent) {
                 }
                 
                 state.native_window = Some(win.clone());
+                
+                // Detect initial orientation
+                let width = win.width();
+                let height = win.height();
+                state.orientation = if width > height {
+                    Orientation::Landscape
+                } else {
+                    Orientation::Portrait
+                };
+                info!("Initial orientation: {:?} ({}x{})", state.orientation, width, height);
+                
                 // Resize backend to match window
                 resize_backend(state, win);
             }
@@ -197,9 +222,23 @@ fn handle_lifecycle(state: &mut AppState, app: &AndroidApp, event: MainEvent) {
             // Re-measure grid - clone window to avoid borrow checker issues
             let window = state.native_window.clone();
             if let Some(w) = window {
-                // Update buffer geometry if needed
+                // Detect orientation change
                 let width = w.width();
                 let height = w.height();
+                let new_orientation = if width > height {
+                    Orientation::Landscape
+                } else {
+                    Orientation::Portrait
+                };
+                
+                // Log orientation change if it changed
+                if state.orientation != new_orientation {
+                    info!("Orientation changed: {:?} -> {:?} ({}x{})", 
+                          state.orientation, new_orientation, width, height);
+                    state.orientation = new_orientation;
+                }
+                
+                // Update buffer geometry if needed
                 unsafe {
                     let native_window_ptr = w.ptr().as_ptr() as *mut ndk_sys::ANativeWindow;
                     let result = ANativeWindow_setBuffersGeometry(
@@ -244,8 +283,8 @@ fn resize_backend(state: &mut AppState, window: &NativeWindow) {
     
     if cols > 0 && available_rows > 0 {
         state.terminal.backend_mut().resize(cols, available_rows);
-        info!("Resized terminal to {}x{} (window: {}x{}, top offset: {} rows)", 
-              cols, available_rows, width_px, height_px, state.top_offset_rows);
+        info!("Resized terminal to {}x{} (window: {}x{}, top offset: {} rows, orientation: {:?})", 
+              cols, available_rows, width_px, height_px, state.top_offset_rows, state.orientation);
         // Force a full redraw
         let _ = state.terminal.clear();
     }
@@ -259,6 +298,7 @@ fn draw_tui(state: &mut AppState, window: &NativeWindow) {
         let area = frame.size();
         
         // Render the todo app with buttons
+        // Pass orientation info if needed for layout adjustments
         state.todo_app.render_frame(frame, area);
         
         // Clear button clicked state after rendering (for visual feedback)

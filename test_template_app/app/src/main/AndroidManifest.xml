@@ -14,7 +14,7 @@
             android:exported="true"
             android:label="@string/app_name"
             android:launchMode="singleTask"
-            android:screenOrientation="portrait">
+            android:screenOrientation="sensor">
             <meta-data android:name="android.app.lib_name" android:value="ratadroid" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
