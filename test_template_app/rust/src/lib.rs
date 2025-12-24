@@ -9,9 +9,11 @@ mod backend;
 mod rasterizer;
 #[cfg(target_os = "android")]
 mod input;
+#[cfg(target_os = "android")]
+mod todo_app;
 
 #[cfg(target_os = "android")]
-use android_activity::{AndroidApp, MainEvent, PollEvent};
+use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
 #[cfg(target_os = "android")]
 use android_logger::Config;
 #[cfg(target_os = "android")]
@@ -43,6 +45,7 @@ struct AppState {
     rasterizer: rasterizer::Rasterizer<'static>,
     should_quit: bool,
     native_window: Option<NativeWindow>,
+    todo_app: todo_app::TodoApp,
 }
 
 /// Android NativeActivity entry point
@@ -74,10 +77,38 @@ pub extern "C" fn android_main(app: AndroidApp) {
         rasterizer,
         should_quit: false,
         native_window: None,
+        todo_app: todo_app::TodoApp::new(),
     };
 
     // Main event loop
     loop {
+        // Poll input events first - this prevents ANR (Application Not Responding)
+        if let Ok(mut input_iter) = app.input_events_iter() {
+            while input_iter.next(|input_event| {
+                // Map Android Input -> TUI Event
+                match input::map_android_event(
+                    input_event,
+                    state.rasterizer.font_width(),
+                    state.rasterizer.font_height(),
+                ) {
+                    Some(tui_event) => {
+                        // Handle quit
+                        if state.todo_app.handle_event(&tui_event) {
+                            state.should_quit = true;
+                        }
+                    }
+                    None => {
+                        // Event not mapped (e.g., unsupported key or motion action)
+                        // This is fine, we just ignore it
+                    }
+                }
+                // Return Handled to acknowledge we processed the event (prevents ANR)
+                InputStatus::Handled
+            }) {
+                // Continue processing events
+            }
+        }
+        
         app.poll_events(Some(Duration::from_millis(16)), |event| {
             match event {
                 PollEvent::Main(main_event) => {
@@ -178,59 +209,12 @@ fn draw_tui(state: &mut AppState, window: &NativeWindow) {
     let _ = state.terminal.draw(|frame| {
         let area = frame.size();
         
-        // Create a vertical layout
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Min(0),
-                Constraint::Length(3),
-            ])
-            .split(area);
-        
-        // Header
-        let header = Paragraph::new(vec![
-            Line::from(vec![ratatui::text::Span::styled(
-                " Ratadroid Terminal UI ",
-                Style::default()
-                    .fg(Color::White)
-                    .bg(Color::Blue)
-                    .add_modifier(Modifier::BOLD),
-            )]),
-            Line::from(vec![ratatui::text::Span::raw("")]),
-            Line::from(vec![ratatui::text::Span::raw("Welcome to your Android TUI app!")]),
-        ])
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center);
-        frame.render_widget(header, chunks[0]);
-        
-        // Main content area
-        let content = Paragraph::new(vec![
-            Line::from(vec![ratatui::text::Span::raw("")]),
-            Line::from(vec![ratatui::text::Span::raw("This is a Ratatui example running natively on Android.")]),
-            Line::from(vec![ratatui::text::Span::raw("")]),
-            Line::from(vec![ratatui::text::Span::raw("The TUI is rendered directly to the Android Surface.")]),
-            Line::from(vec![ratatui::text::Span::raw("")]),
-            Line::from(vec![ratatui::text::Span::raw("Touch me to interact!")]),
-        ])
-        .block(Block::default().borders(Borders::ALL).title("Content"))
-        .alignment(Alignment::Left);
-        frame.render_widget(content, chunks[1]);
-        
-        // Footer
-        let footer = Paragraph::new(vec![
-            Line::from(vec![ratatui::text::Span::raw("")]),
-            Line::from(vec![ratatui::text::Span::styled(
-                " Ratatui Android Runtime ",
-                Style::default()
-                    .fg(Color::White)
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD),
-            )]),
-        ])
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center);
-        frame.render_widget(footer, chunks[2]);
+        // Render the todo app
+        let todo_lines = state.todo_app.render(area);
+        let content = Paragraph::new(todo_lines)
+            .block(Block::default().borders(Borders::ALL).title("Todo App"))
+            .alignment(Alignment::Left);
+        frame.render_widget(content, area);
     });
 
     // B. Pixel Blit Pass

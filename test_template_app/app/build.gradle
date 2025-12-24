@@ -1,0 +1,77 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.ratadroid.test_template_app'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "com.ratadroid.test_template_app"
+        minSdk 24
+        targetSdk 36
+        versionCode 1
+        versionName "1.0"
+        ndk {
+            abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    
+    ndkVersion "25.1.8937393"
+}
+
+// Task to build Rust library
+task buildRust(type: Exec) {
+    workingDir '../rust'
+    commandLine 'cargo', 'ndk', '-t', 'arm64-v8a', '-t', 'armeabi-v7a', '-t', 'x86', '-t', 'x86_64', 'build', '--release'
+    doLast {
+        // Copy native libraries to the correct jniLibs structure
+        def jniLibsDir = file("src/main/jniLibs")
+        jniLibsDir.mkdirs()
+        
+        // Map cargo-ndk output to Android ABI directories
+        def abiMap = [
+            'aarch64-linux-android': 'arm64-v8a',
+            'armv7-linux-androideabi': 'armeabi-v7a',
+            'i686-linux-android': 'x86',
+            'x86_64-linux-android': 'x86_64'
+        ]
+        
+        abiMap.each { cargoTarget, androidAbi ->
+            def sourceLib = file("../rust/target/${cargoTarget}/release/libratadroid.so")
+            if (sourceLib.exists()) {
+                def targetDir = file("src/main/jniLibs/${androidAbi}")
+                targetDir.mkdirs()
+                copy {
+                    from sourceLib
+                    into targetDir
+                    rename 'libratadroid.so', 'libratadroid.so'
+                }
+            }
+        }
+    }
+}
+
+// Make Rust build run before Android build
+tasks.whenTaskAdded { task ->
+    if (task.name == 'mergeDebugJniLibFolders' || task.name == 'mergeReleaseJniLibFolders') {
+        task.dependsOn 'buildRust'
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+}
+
