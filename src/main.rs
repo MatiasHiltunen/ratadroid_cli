@@ -147,7 +147,7 @@ async fn ensure_gradle(project_dir: &Path) -> Result<String, Box<dyn std::error:
         println!("Initializing Gradle wrapper...");
         let status = Command::new(&gradle)
             .current_dir(project_dir)
-            .args(["wrapper", "--gradle-version", "8.5"])
+            .args(["wrapper", "--gradle-version", "8.13"])
             .status()?;
         
         if status.success() {
