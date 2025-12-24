@@ -2,6 +2,8 @@
 
 `ratadroid` is a command-line tool for building Ratatui (TUI) applications that run natively on Android. It scaffolds Android NativeActivity projects with Rust integration, manages Gradle-based builds, and provides basic development workflow automation.
 
+![](Screenshot_20251224_073141_test_template_app.jpg)
+
 **Note**: This is an experimental tool. The Ratatui Android Runtime is functional but may have limitations and edge cases. Expect some rough edges.
 
 ## Features
