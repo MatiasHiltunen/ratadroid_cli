@@ -76,7 +76,7 @@ impl<'a> Rasterizer<'a> {
         window_width: usize,
         window_height: usize,
     ) {
-        self.render_to_surface_with_offset(backend, dest, stride, window_width, window_height, 0);
+        self.render_to_surface_with_offset(backend, dest, stride, window_width, window_height, 0, 0);
     }
 
     /// Render with vertical offsets (for status bar and navigation bar)

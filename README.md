@@ -1,173 +1,256 @@
-<!--
-This README file accompanies the ratadroid‑cli project.  It provides an overview of
-the command‑line interface and step‑by‑step instructions for configuring a
-development environment for Rust‑based terminal applications targeting Android.
-The CLI aims to automate as much of the boilerplate as possible while still
-allowing developers full control over their build pipeline.
--->
-
 # Ratadroid CLI
 
-`ratadroid‑cli` is a lightweight companion tool for developers building
-terminal user interface (TUI) applications in Rust on Android.  It automates
-common setup tasks, wraps `cargo‑ndk` to build your crate for Android
-architectures and hosts generated APKs over HTTP for easy installation on
-physical devices during development.
+`ratadroid` is a command-line tool for building Ratatui (TUI) applications that run natively on Android. It scaffolds Android NativeActivity projects with Rust integration, manages Gradle-based builds, and provides basic development workflow automation.
+
+**Note**: This is an experimental tool. The Ratatui Android Runtime is functional but may have limitations and edge cases. Expect some rough edges.
 
 ## Features
 
-- **Guided environment setup**:  The `init` subcommand prints instructions
-  and attempts to install `cargo‑ndk` and add common Android targets via
-  `rustup`.  It also reminds you to install the Android NDK using Android
-  Studio’s SDK Manager and set the `ANDROID_NDK_HOME` environment variable.
-- **One‑line builds**:  Use `ratadroid‑cli build` to invoke `cargo ndk` with
-  sensible defaults.  You can specify the target triple with
-  `--target`, and the build artifacts are emitted into a `dist` directory.
-- **HTTP file server**:  The `serve` subcommand spins up a small
-  Hyper‑based server that exposes the contents of a directory (default `dist`) on
-  your local network.  Browsing to `http://<host>:<port>/` lists the files
-  and allows direct download of `.apk` packages on your phone or tablet.
-- **Works with modern crates**:  The tool is designed for Rust 2024
-  edition projects and plays nicely with recent mobile tooling such as
-  [`android‑activity`](https://crates.io/crates/android‑activity) and the
-  Robius ecosystem, which provide first‑class support for deep links and
-  other Android platform features.
-- **Environment diagnostics**:  A new `doctor` command examines your system for
-  common Android and Rust prerequisites – it checks that the Android SDK and
-  NDK are present and that licenses are accepted, verifies that `cargo‑ndk` and
-  the necessary Rust targets are installed, and scans for available emulators.
-  With `--fix` the doctor attempts to install missing components automatically
-  using `cargo install`, `rustup target add` and `sdkmanager`.
+- **Project scaffolding**: The `new` command creates an Android NativeActivity project with Gradle build configuration and Rust integration
+- **Gradle builds**: Uses Gradle to build Android APKs with automatic Rust library compilation via `cargo-ndk`
+- **Device management**: Detects connected devices and can start emulators if none are available
+- **Ratatui Android Runtime**: A custom terminal emulator implementation that renders Ratatui applications directly to Android surfaces
+- **Basic input support**: Touch input and keyboard support (including some international keyboard handling)
+- **Environment diagnostics**: The `doctor` command checks your development environment
 
 ## Installation
 
-Clone or download this repository and build it with a recent Rust toolchain
-(`rustup install stable` if you haven’t already).  Then run:
+Build from source:
 
 ```sh
 cd ratadroid_cli
 cargo install --path .
 ```
 
-This installs `ratadroid‑cli` into your `~/.cargo/bin` directory.  You can
-also run it locally via `cargo run -- <subcommand>` while developing.
-
-## Usage
-
-Run `ratadroid‑cli --help` for an overview of available commands.  The
-subcommands are described in detail below.
-
-### Initialize your environment
-
-```
-ratadroid‑cli init
+Or run directly:
+```sh
+cargo run -- <command>
 ```
 
-This command performs a best‑effort configuration of your Android build
-environment:
+## Prerequisites
 
-1. **Install the NDK** – You must manually install the Android NDK via
-   Android Studio’s SDK Manager.  Once installed, set the `ANDROID_NDK_HOME`
-   environment variable to the NDK directory.
-2. **Install `cargo‑ndk`** – The CLI attempts to run
-   `cargo install cargo-ndk --force`.  If installation fails (for example,
-   because `cargo` is not on your `PATH`), the tool prints a warning and
-   instructs you to install it manually.
-3. **Add Android targets** – The CLI runs `rustup target add` for the
-   following architectures: `aarch64-linux-android`, `armv7-linux-androideabi`,
-   `i686-linux-android` and `x86_64-linux-android`.  These targets are
-   necessary to build Rust crates for modern devices and emulators.
-4. **Optional Robius crates** – For advanced features like deep links and
-   secure storage, add crates such as `robius-url-handler` and
-   `robius-android-env` to your `Cargo.toml`.  The CLI does not install
-   these automatically but reminds you of their existence.
+- **Android SDK** - Install via Android Studio
+- **Android NDK** - Install via Android Studio SDK Manager (version 25.1.8937393)
+- **Rust toolchain** - Install via [rustup](https://rustup.rs/)
+- **cargo-ndk** - Install with `cargo install cargo-ndk`
 
-### Build your project
+Gradle will be downloaded automatically via Gradle Wrapper.
 
-```
-ratadroid‑cli build [--target <triple>]
-```
+Run `ratadroid doctor --fix` to check your environment.
 
-This command wraps `cargo ndk build --release` and emits artifacts into a
-`dist` directory.  By default it targets `aarch64-linux-android`, which is
-appropriate for modern 64‑bit ARM devices.  Specify `--target
-armv7-linux-androideabi`, `i686-linux-android` or `x86_64-linux-android` to
-build for other architectures.
+## Quick Start
 
-Internally, the CLI spawns a child process to run `cargo ndk`.  If you
-haven’t installed `cargo‑ndk` or set `ANDROID_NDK_HOME`, the build will
-fail and you’ll see an error message.
-
-### Serve built APKs
-
-```
-ratadroid‑cli serve [--port <number>] [--dir <path>]
-```
-
-Use this subcommand to start a small HTTP server for sharing your compiled
-APKs and other files.  By default it serves the `dist` directory on port
-8000.  The server prints the absolute path being served and the URL to
-navigate to from your phone’s browser.  Any files in the directory (including
-`.apk`) are listed on the index page.  Clicking a link downloads the file.
-
-You can specify a different port or directory if needed.  For example:
+### 1. Create a new project
 
 ```sh
-ratadroid‑cli serve --port 9000 --dir path/to/apks
+ratadroid new my-app
+cd my-app
 ```
 
-### Diagnose your environment
+This creates a project with:
+- Gradle build files
+- Rust library with Ratatui Android Runtime
+- Example todo app
+- Basic Android manifest
+
+### 2. Build and run
+
+```sh
+ratadroid run
+```
+
+This builds the Rust library, builds the APK, and installs it on a connected device (or starts an emulator if none available).
+
+## Commands
+
+### `ratadroid new <name> [--path <dir>]`
+
+Scaffold a new Android NativeActivity project.
+
+```sh
+ratadroid new my-app
+```
+
+### `ratadroid build [--variant <debug|release>]`
+
+Build the Android project using Gradle.
+
+```sh
+ratadroid build                    # Debug build
+ratadroid build --variant release  # Release build (signed with debug keystore)
+```
+
+### `ratadroid install [--variant <debug|release>]`
+
+Install the APK on a connected device or emulator. Prefers physical devices over emulators.
+
+```sh
+ratadroid install
+```
+
+### `ratadroid run [--variant <debug|release>]`
+
+Build, install, and launch the app. If no device is connected, attempts to start an available emulator.
+
+```sh
+ratadroid run
+```
+
+**Note**: Emulator auto-start waits for boot completion, which can take 30-120 seconds.
+
+### `ratadroid devices`
+
+List all available Android devices and emulators.
+
+```sh
+ratadroid devices
+```
+
+### `ratadroid logs [--package <name>] [--lines <n>]`
+
+Show crash logs and errors from the app.
+
+```sh
+ratadroid logs
+ratadroid logs --lines 200
+```
+
+### `ratadroid doctor [--fix]`
+
+Check your development environment and optionally fix issues.
+
+```sh
+ratadroid doctor
+ratadroid doctor --fix
+```
+
+### `ratadroid serve [--port <number>] [--dir <path>]`
+
+Serve APKs over HTTP for easy installation on devices.
+
+```sh
+ratadroid serve
+```
+
+## Project Structure
 
 ```
-ratadroid‑cli doctor [--fix]
+my-app/
+├── app/
+│   ├── build.gradle
+│   └── src/main/
+│       ├── AndroidManifest.xml
+│       ├── java/com/ratadroid/my_app/NativeActivity.java
+│       └── res/values/strings.xml
+├── rust/
+│   ├── Cargo.toml
+│   ├── src/
+│   │   ├── lib.rs           # Main entry point
+│   │   ├── backend.rs       # Ratatui backend
+│   │   ├── rasterizer.rs    # Software rasterizer
+│   │   └── input.rs         # Input handling
+│   └── fonts/               # Optional font files
+├── build.gradle
+├── settings.gradle
+└── gradlew
 ```
 
-The `doctor` subcommand inspects your development machine and reports on
-critical components:
+## Ratatui Android Runtime
 
-1. **Rust prerequisites** – Checks whether `cargo‑ndk` is installed and
-   whether the Android Rust targets (`aarch64-linux-android`,
-   `armv7-linux-androideabi`, `i686-linux-android`, `x86_64-linux-android`) are
-   available via `rustup`.  If any targets are missing, the doctor lists
-   them and, when `--fix` is specified, runs `rustup target add` to
-   install them.
-2. **Android SDK and NDK** – Looks for the SDK by examining the
-   `ANDROID_SDK_ROOT` or `ANDROID_HOME` environment variables and common
-   default directories on Windows, macOS, and Linux.  If found, it
-   verifies that the commandline tools (`sdkmanager`, `avdmanager`,
-   `emulator`) exist and that an NDK is installed.  When the SDK is
-   missing or incomplete, the doctor offers guidance and, with
-   `--fix`, uses `sdkmanager` to install the NDK.
-3. **AVD availability** – Invokes `emulator -list-avds` to show any
-   existing Android Virtual Devices and warns if none are present.
-4. **Licenses** – Checks whether the `licenses` directory within the
-   SDK contains an `android-sdk-license` file.  If not, it recommends
-   running `sdkmanager --licenses` to accept the terms.  With
-   `--fix`, the doctor attempts to run this command automatically.
+The scaffolded projects include a Ratatui Android Runtime implementation:
 
-Run the doctor whenever you suspect your toolchain is misconfigured.  The
-`--fix` flag automates remediation steps where possible, though manual
-installation via Android Studio may still be necessary for certain
-components (such as downloading the SDK itself).
+- **Direct surface rendering** - Renders Ratatui cells directly to Android surfaces
+- **Software rasterization** - Uses embedded fonts to convert cells to pixels
+- **Touch input** - Maps Android touch events to Ratatui mouse events
+- **Keyboard input** - Basic keyboard support with some international character handling
+- **Orientation support** - Handles screen rotation
+- **System UI padding** - Reserves space for status bar and navigation bar
 
-## Running on real devices
+### Known Limitations
 
-1. Connect your Android device to the same Wi‑Fi network as your development
-   machine.
-2. Run `ratadroid‑cli serve` on your machine and note the IP address (e.g.
-   `http://192.168.1.100:8000/`).
-3. Open this URL in the mobile browser.  You should see a list of APKs.
-4. Tap the APK you wish to install.  Make sure you have enabled
-   *Install unknown apps* in Android settings.  For debugging builds you may
-   need to allow installation from your browser.
+- Font rendering is basic - uses embedded TTF fonts, may not handle all Unicode characters perfectly
+- Input handling has some edge cases - Scandinavian keyboard support works but may need refinement
+- Performance - Software rasterization is CPU-intensive, may struggle on older devices
+- Soft keyboard - May not appear reliably on all devices/Android versions
+- Some Ratatui widgets may not work perfectly - the runtime is a custom backend implementation
+
+### Customization
+
+Edit the Rust code in `rust/src/` to customize:
+- `lib.rs` - Main app logic and event loop
+- `backend.rs` - Ratatui backend implementation
+- `rasterizer.rs` - Rendering logic
+- `input.rs` - Input event handling
+
+## Development Workflow
+
+1. Create project: `ratadroid new my-app`
+2. Edit code: Modify `rust/src/lib.rs` and other Rust files
+3. Build and test: `ratadroid run`
+4. View logs: `ratadroid logs` (in another terminal)
+5. Iterate
+
+## Troubleshooting
+
+### Build fails
+
+- Ensure you're in a project directory created with `ratadroid new`
+- Check that `cargo-ndk` is installed: `cargo install cargo-ndk`
+- Verify Android SDK/NDK paths with `ratadroid doctor`
+
+### "No devices connected"
+
+- Connect a device via USB with USB debugging enabled
+- Or create an AVD in Android Studio first
+- Check with `ratadroid devices`
+
+### Release build won't install
+
+Release builds are signed with a debug keystore. If installation fails:
+- Use debug builds: `ratadroid run --variant debug`
+- Check device settings for "Install unknown apps" permission
+- Some devices may reject unsigned release APKs even with `-t` flag
+
+### Keyboard not showing
+
+The soft keyboard implementation uses JNI and may not work reliably on all devices:
+- Check `ratadroid logs` for errors
+- Try tapping the text input area multiple times
+- Physical keyboards work more reliably
+
+### App crashes or renders incorrectly
+
+- Check `ratadroid logs` for crash details
+- Verify font file exists in `rust/fonts/Hack-Regular.ttf`
+- Try reducing font size in `rust/src/lib.rs` (FONT_SIZE constant)
+- Some Ratatui widgets may not render correctly - this is experimental
+
+### Emulator takes too long to start
+
+Emulator boot can take 1-2 minutes. The tool waits for boot completion automatically. Be patient or use a physical device for faster iteration.
+
+## Architecture Support
+
+Builds for:
+- `arm64-v8a` (64-bit ARM)
+- `armeabi-v7a` (32-bit ARM)
+- `x86_64` (64-bit x86)
+- `x86` (32-bit x86)
+
+All architectures are built by default. The `--target` option for `build` is not yet implemented (builds all architectures).
+
+## Limitations and Future Work
+
+- Some Ratatui features may not work perfectly
+- Performance optimization needed for complex UIs
+- Better font fallback handling
+- More robust keyboard support
+- Better error messages and diagnostics
 
 ## Contributing
 
-The CLI is a simple utility intended to streamline development workflows.
-Contributions, bug reports and feature requests are welcome.  Feel free to
-open an issue or pull request on the project repository.
+This is an experimental project. Contributions, bug reports, and feedback are welcome. Expect rough edges and incomplete features.
 
 ## License
 
-This project is distributed under the MIT License.  See `LICENSE` for
-details.
+MIT License. See `LICENSE` for details.
