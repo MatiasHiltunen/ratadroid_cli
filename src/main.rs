@@ -86,6 +86,8 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         fix: bool,
     },
+    /// List all available Android devices and emulators.
+    Devices,
 }
 
 #[tokio::main]
@@ -101,6 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Serve { port, dir } => handle_serve(port, dir).await,
         Commands::Doctor { fix } => handle_doctor(fix).await,
         Commands::Logs { package, lines } => handle_logs(package, lines).await,
+        Commands::Devices => handle_devices().await,
     }
 }
 
@@ -332,7 +335,6 @@ fn find_adb() -> Option<String> {
 }
 
 /// Finds emulator executable from SDK path or PATH.
-#[allow(dead_code)]
 fn find_emulator() -> Option<String> {
     // First check if emulator is in PATH
     if Command::new("emulator").arg("-version").output().is_ok() {
@@ -352,6 +354,385 @@ fn find_emulator() -> Option<String> {
     }
     
     None
+}
+
+/// Device information structure
+#[derive(Debug, Clone)]
+struct DeviceInfo {
+    id: String,
+    state: String,
+    is_physical: bool,
+    model: String,
+    product: String,
+}
+
+/// Checks if any Android devices are connected and ready.
+fn has_connected_devices(adb: &str) -> bool {
+    match Command::new(adb).args(["devices"]).output() {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // Check for device lines (not "List of devices" header or empty)
+            // Only count devices that are in "device" state (not "offline" or "unauthorized")
+            stdout.lines()
+                .skip(1) // Skip "List of devices attached" header
+                .any(|line| {
+                    let trimmed = line.trim();
+                    !trimmed.is_empty() && trimmed.ends_with("device")
+                })
+        }
+        Err(_) => false,
+    }
+}
+
+/// Lists all connected devices with their details.
+fn list_devices(adb: &str) -> Vec<DeviceInfo> {
+    let mut devices = Vec::new();
+    
+    match Command::new(adb).args(["devices", "-l"]).output() {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines().skip(1) {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                
+                // Parse line format: "device_id    device state model:model_name product:product_name"
+                let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                if parts.is_empty() {
+                    continue;
+                }
+                
+                let device_id = parts[0].to_string();
+                let state = parts.get(1).unwrap_or(&"unknown").to_string();
+                
+                // Only include devices in "device" state (ready)
+                if state != "device" {
+                    continue;
+                }
+                
+                // Extract model and product from the rest of the line
+                let mut model = String::new();
+                let mut product = String::new();
+                let mut is_physical = true; // Default to physical, check below
+                
+                for part in parts.iter().skip(2) {
+                    if part.starts_with("model:") {
+                        model = part.strip_prefix("model:").unwrap_or("").to_string();
+                    } else if part.starts_with("product:") {
+                        product = part.strip_prefix("product:").unwrap_or("").to_string();
+                    }
+                }
+                
+                // Check if it's an emulator (emulator devices typically have "sdk" or "emulator" in model/product)
+                // Also check device ID - emulators usually start with "emulator-"
+                if device_id.starts_with("emulator-") 
+                    || model.to_lowercase().contains("sdk")
+                    || model.to_lowercase().contains("emulator")
+                    || product.to_lowercase().contains("sdk")
+                    || product.to_lowercase().contains("emulator") {
+                    is_physical = false;
+                }
+                
+                // If model/product are empty, try to get them via adb shell
+                if model.is_empty() || product.is_empty() {
+                    if let Ok(prop_output) = Command::new(adb)
+                        .args(["shell", "-s", &device_id, "getprop", "ro.product.model"])
+                        .output() {
+                        let prop_stdout = String::from_utf8_lossy(&prop_output.stdout);
+                        if !prop_stdout.trim().is_empty() && model.is_empty() {
+                            model = prop_stdout.trim().to_string();
+                        }
+                    }
+                    
+                    if let Ok(prop_output) = Command::new(adb)
+                        .args(["shell", "-s", &device_id, "getprop", "ro.product.name"])
+                        .output() {
+                        let prop_stdout = String::from_utf8_lossy(&prop_output.stdout);
+                        if !prop_stdout.trim().is_empty() && product.is_empty() {
+                            product = prop_stdout.trim().to_string();
+                        }
+                    }
+                }
+                
+                devices.push(DeviceInfo {
+                    id: device_id,
+                    state,
+                    is_physical,
+                    model: if model.is_empty() { "Unknown".to_string() } else { model },
+                    product: if product.is_empty() { "Unknown".to_string() } else { product },
+                });
+            }
+        }
+        Err(_) => {}
+    }
+    
+    devices
+}
+
+/// Gets the first available physical device, or any device if no physical device is available.
+fn get_preferred_device(adb: &str) -> Option<DeviceInfo> {
+    let devices = list_devices(adb);
+    
+    // Prefer physical devices
+    if let Some(physical) = devices.iter().find(|d| d.is_physical) {
+        return Some(physical.clone());
+    }
+    
+    // Fall back to any device
+    devices.first().cloned()
+}
+
+/// Lists available Android Virtual Devices (AVDs).
+fn list_avds(emulator: &str) -> Vec<String> {
+    match Command::new(emulator).arg("-list-avds").output() {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            stdout.lines()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Starts an emulator with the given AVD name and waits for it to boot.
+async fn start_emulator(emulator: &str, avd_name: &str, adb: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // Check if emulator is already running (might be booting)
+    if has_connected_devices(adb) {
+        println!("✓ Device/emulator already available");
+        return Ok(());
+    }
+    
+    println!("Starting emulator: {}...", avd_name);
+    
+    // Start emulator in background (detached, so it continues running)
+    let mut child = Command::new(emulator)
+        .args(["-avd", avd_name])
+        .spawn()
+        .map_err(|e| format!("Failed to start emulator: {}", e))?;
+    
+    // Wait a moment for emulator to initialize
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    
+    println!("Waiting for emulator to boot...");
+    
+    // Wait for device to be detected by adb
+    let wait_status = Command::new(adb)
+        .args(["wait-for-device"])
+        .status();
+    
+    if wait_status.is_err() || !wait_status.unwrap().success() {
+        // Try to kill the emulator process if wait failed
+        let _ = child.kill();
+        return Err("Failed to wait for emulator device".into());
+    }
+    
+    // Wait for boot completion (check bootanim property)
+    println!("Waiting for boot completion...");
+    let mut booted = false;
+    for i in 0..120 { // Wait up to 2 minutes (120 * 1 second)
+        // Show progress every 10 seconds
+        if i > 0 && i % 10 == 0 {
+            print!(".");
+            use std::io::Write;
+            std::io::stdout().flush().ok();
+        }
+        
+        let boot_status = Command::new(adb)
+            .args(["shell", "getprop", "sys.boot_completed"])
+            .output();
+        
+        if let Ok(output) = boot_status {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.trim() == "1" {
+                booted = true;
+                if i > 0 {
+                    println!(); // New line after progress dots
+                }
+                break;
+            }
+        }
+        
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    }
+    
+    if !booted {
+        println!(); // New line if we didn't break early
+        return Err("Emulator did not boot within timeout period (2 minutes)".into());
+    }
+    
+    println!("✓ Emulator is ready!");
+    // Note: We don't wait for the child process - emulator runs in background
+    // This is intentional - the emulator should keep running
+    Ok(())
+}
+
+/// Ensures a device or emulator is available, starting one if needed.
+/// Prefers physical devices over emulators.
+/// Returns the device ID of the selected device, or None if multiple devices are available and we should let adb choose.
+async fn ensure_device_available() -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let adb = find_adb()
+        .ok_or("adb not found. Make sure Android SDK platform-tools is installed.")?;
+    
+    // Check if devices are already connected
+    if has_connected_devices(&adb) {
+        // Check if we have a physical device (preferred)
+        let devices = list_devices(&adb);
+        let has_physical = devices.iter().any(|d| d.is_physical);
+        
+        if has_physical {
+            let physical_devices: Vec<_> = devices.iter().filter(|d| d.is_physical).collect();
+            if physical_devices.len() == 1 {
+                println!("✓ Using physical device: {} ({})", 
+                    physical_devices[0].model, physical_devices[0].id);
+                return Ok(Some(physical_devices[0].id.clone()));
+            } else {
+                // Multiple physical devices - prefer the first one
+                println!("✓ {} physical device(s) available, using: {} ({})", 
+                    physical_devices.len(),
+                    physical_devices[0].model, physical_devices[0].id);
+                return Ok(Some(physical_devices[0].id.clone()));
+            }
+        } else {
+            // Only emulators available
+            if devices.len() == 1 {
+                println!("✓ Using emulator: {}", devices[0].id);
+                return Ok(Some(devices[0].id.clone()));
+            } else {
+                // Multiple emulators - use the first one
+                println!("✓ {} emulator(s) available, using: {}", devices.len(), devices[0].id);
+                return Ok(Some(devices[0].id.clone()));
+            }
+        }
+    }
+    
+    // No devices connected, try to start an emulator
+    let emulator = find_emulator()
+        .ok_or("No devices connected and emulator not found. Please connect a device or install Android emulator.")?;
+    
+    let avds = list_avds(&emulator);
+    if avds.is_empty() {
+        return Err("No devices connected and no AVDs available. Please create an AVD using Android Studio or connect a device.".into());
+    }
+    
+    // Use the first available AVD
+    let avd_name = &avds[0];
+    if avds.len() > 1 {
+        println!("Multiple AVDs available, using: {}", avd_name);
+    }
+    
+    start_emulator(&emulator, avd_name, &adb).await?;
+    
+    // After starting emulator, get the device ID
+    let devices = list_devices(&adb);
+    if let Some(device) = devices.first() {
+        Ok(Some(device.id.clone()))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Lists all available devices and emulators.
+async fn handle_devices() -> Result<(), Box<dyn std::error::Error>> {
+    let adb = find_adb()
+        .ok_or("adb not found. Make sure Android SDK platform-tools is installed.")?;
+    
+    println!("{}", "═".repeat(80));
+    println!("AVAILABLE DEVICES");
+    println!("{}", "═".repeat(80));
+    println!();
+    
+    let devices = list_devices(&adb);
+    
+    if devices.is_empty() {
+        println!("No devices connected.");
+        println!();
+        
+        // Check for available AVDs
+        if let Some(emulator) = find_emulator() {
+            let avds = list_avds(&emulator);
+            if !avds.is_empty() {
+                println!("Available AVDs (not running):");
+                for (i, avd) in avds.iter().enumerate() {
+                    println!("  {}. {}", i + 1, avd);
+                }
+                println!();
+                println!("Start an emulator with: ratadroid run");
+            } else {
+                println!("No AVDs available. Create one using Android Studio.");
+            }
+        } else {
+            println!("Emulator not found. Install Android emulator via Android Studio.");
+        }
+        
+        return Ok(());
+    }
+    
+    // Separate physical devices and emulators
+    let physical_devices: Vec<_> = devices.iter().filter(|d| d.is_physical).collect();
+    let emulators: Vec<_> = devices.iter().filter(|d| !d.is_physical).collect();
+    
+    if !physical_devices.is_empty() {
+        println!("📱 PHYSICAL DEVICES:");
+        println!("{}", "─".repeat(80));
+        for device in &physical_devices {
+            println!("  ID:       {}", device.id);
+            println!("  Model:    {}", device.model);
+            println!("  Product:  {}", device.product);
+            println!("  State:    {} {}", device.state, if device.state == "device" { "✓" } else { "" });
+            println!();
+        }
+    }
+    
+    if !emulators.is_empty() {
+        println!("🖥️  EMULATORS:");
+        println!("{}", "─".repeat(80));
+        for device in &emulators {
+            println!("  ID:       {}", device.id);
+            println!("  Model:    {}", device.model);
+            println!("  Product:  {}", device.product);
+            println!("  State:    {} {}", device.state, if device.state == "device" { "✓" } else { "" });
+            println!();
+        }
+    }
+    
+    // Show available but not running AVDs
+    if let Some(emulator) = find_emulator() {
+        let avds = list_avds(&emulator);
+        let running_avd_names: Vec<String> = emulators.iter()
+            .map(|d| {
+                // Try to extract AVD name from emulator device
+                // This is approximate - emulator IDs don't directly map to AVD names
+                d.id.clone()
+            })
+            .collect();
+        
+        let not_running: Vec<_> = avds.iter()
+            .filter(|avd| {
+                // Check if this AVD is already running
+                // This is approximate - we can't perfectly match AVD names to device IDs
+                !running_avd_names.iter().any(|id| id.contains(avd.as_str()))
+            })
+            .collect();
+        
+        if !not_running.is_empty() {
+            println!("💤 AVAILABLE AVDs (not running):");
+            println!("{}", "─".repeat(80));
+            for avd in &not_running {
+                println!("  • {}", avd);
+            }
+            println!();
+        }
+    }
+    
+    println!("{}", "═".repeat(80));
+    if !physical_devices.is_empty() {
+        println!("Note: Physical devices are preferred when running apps.");
+    }
+    
+    Ok(())
 }
 
 /// Scaffolds a new Android NativeActivity project with Rust integration.
@@ -400,9 +781,8 @@ async fn handle_new(name: String, path: Option<PathBuf>) -> Result<(), Box<dyn s
     fs::write(project_dir.join("build.gradle"), root_build_gradle).await?;
     
     // Create settings.gradle
-    let settings_gradle = format!(r#"rootProject.name = "{}"
-include ':app'
-"#, name);
+    let settings_gradle_template = include_str!("../templates/settings.gradle");
+    let settings_gradle = replace_template(settings_gradle_template);
     fs::write(project_dir.join("settings.gradle"), settings_gradle).await?;
     
     // Create gradle.properties
@@ -556,18 +936,114 @@ async fn handle_gradle_install(variant: String) -> Result<(), Box<dyn std::error
     let gradle = find_gradle(Some(&project_dir))
         .ok_or("Gradle not found. Run 'ratadroid init' or ensure Gradle is installed.")?;
     
+    // Ensure a device is available before attempting installation
+    // Get the device ID to pass to Gradle if multiple devices are connected
+    let device_id = ensure_device_available().await?;
+    
     println!("Installing APK (variant: {})...", variant);
     
-    let task = format!("install{}", capitalize_first(&variant));
-    let status = Command::new(&gradle)
-        .current_dir(&project_dir)
-        .arg(&task)
-        .status()?;
+    // For release builds, installRelease task typically doesn't exist unless the build is signed
+    // So we'll use adb install directly for release builds
+    // For debug builds, try Gradle install task first
+    let use_gradle_install = variant == "debug";
     
-    if status.success() {
-        println!("\n✓ Installation succeeded!");
+    if use_gradle_install {
+        let task = format!("install{}", capitalize_first(&variant));
+        let mut gradle_cmd = Command::new(&gradle);
+        gradle_cmd.current_dir(&project_dir).arg(&task);
+        
+        // If we have a specific device ID and multiple devices are connected, tell Gradle which one to use
+        if let Some(device_id) = &device_id {
+            // Set ANDROID_SERIAL environment variable to tell Gradle/adb which device to use
+            gradle_cmd.env("ANDROID_SERIAL", device_id);
+        }
+        
+        let status = gradle_cmd.status()?;
+        
+        if status.success() {
+            println!("\n✓ Installation succeeded!");
+        } else {
+            return Err(format!("Installation failed with exit status {}", status.code().unwrap_or(-1)).into());
+        }
     } else {
-        return Err(format!("Installation failed with exit status {}", status.code().unwrap_or(-1)).into());
+        // Fallback to adb install for release builds or when install task doesn't exist
+        let adb = find_adb()
+            .ok_or("adb not found. Make sure Android SDK platform-tools is installed.")?;
+        
+        // Find the APK file
+        // Release builds are typically named app-release-unsigned.apk
+        let apk_dir = project_dir
+            .join("app")
+            .join("build")
+            .join("outputs")
+            .join("apk")
+            .join(&variant);
+        
+        // Try signed release APK first, then unsigned, then standard naming
+        let apk_path = if variant == "release" {
+            // Prefer signed release APK (if signingConfig is configured)
+            let signed_path = apk_dir.join("app-release.apk");
+            let unsigned_path = apk_dir.join("app-release-unsigned.apk");
+            
+            if signed_path.exists() {
+                signed_path
+            } else if unsigned_path.exists() {
+                unsigned_path
+            } else {
+                return Err(format!("Release APK not found. Expected at {} or {}", 
+                    signed_path.display(), unsigned_path.display()).into());
+            }
+        } else {
+            apk_dir.join(format!("app-{}.apk", variant))
+        };
+        
+        if !apk_path.exists() {
+            return Err(format!("APK not found at {}. Build the project first with 'ratadroid build --variant {}'", 
+                apk_path.display(), variant).into());
+        }
+        
+        println!("Using adb install (install{} task not available)...", capitalize_first(&variant));
+        
+        let mut adb_cmd = Command::new(&adb);
+        
+        // If we have a specific device ID, use it
+        if let Some(device_id) = &device_id {
+            adb_cmd.args(["-s", device_id]);
+        }
+        
+        // Install APK (signed release APKs don't need -t flag)
+        adb_cmd.args(["install", "-r", apk_path.to_str().unwrap()]);
+        
+        let output = adb_cmd.output()?;
+        
+        if output.status.success() {
+            println!("\n✓ Installation succeeded!");
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            
+            // Provide helpful error message for unsigned release APKs
+            if stderr.contains("INSTALL_PARSE_FAILED_NO_CERTIFICATES") || 
+               stderr.contains("no certificates") {
+                return Err(format!(
+                    "Installation failed: Release APK is unsigned.\n  \
+                    The Gradle build should automatically sign release builds with debug keystore.\n  \
+                    If this error persists, try:\n  \
+                    1. Use debug builds: ratadroid run --variant debug\n  \
+                    2. Check that signingConfig is configured in app/build.gradle"
+                ).into());
+            }
+            
+            let error_msg = if !stderr.is_empty() {
+                stderr.to_string()
+            } else if !stdout.is_empty() {
+                stdout.to_string()
+            } else {
+                format!("Installation failed with exit status {}", output.status.code().unwrap_or(-1))
+            };
+            
+            return Err(format!("Installation failed: {}", error_msg.trim()).into());
+        }
     }
     
     Ok(())
@@ -586,18 +1062,36 @@ async fn handle_gradle_run(variant: String) -> Result<(), Box<dyn std::error::Er
     let adb = find_adb()
         .ok_or("adb not found. Make sure Android SDK platform-tools is installed and accessible.")?;
     
+    // Get the preferred device ID (physical device preferred)
+    let device_id = get_preferred_device(&adb);
+    
     // Then launch
     let package_name = format!("com.ratadroid.{}", 
         project_dir.file_name().and_then(|n| n.to_str()).unwrap_or("app"));
     
     println!("Launching app...");
-    let status = Command::new(&adb)
-        .args(["shell", "am", "start", "-n", &format!("{}/.NativeActivity", package_name)])
-        .status();
+    let mut launch_cmd = Command::new(&adb);
+    
+    // If we have a device ID and multiple devices are connected, specify which device to use
+    if let Some(device_info) = &device_id {
+        launch_cmd.args(["-s", &device_info.id]);
+        println!("  Targeting device: {} ({})", device_info.model, device_info.id);
+    }
+    
+    launch_cmd.args(["shell", "am", "start", "-n", &format!("{}/.NativeActivity", package_name)]);
+    
+    let status = launch_cmd.status();
     
     match status {
         Ok(s) if s.success() => println!("✓ App launched!"),
-        Ok(_) => println!("⚠️  Launch command failed. Try manually: {} shell am start -n {}/.NativeActivity", adb, package_name),
+        Ok(_) => {
+            let cmd_str = if let Some(device_info) = &device_id {
+                format!("{} -s {} shell am start -n {}/.NativeActivity", adb, device_info.id, package_name)
+            } else {
+                format!("{} shell am start -n {}/.NativeActivity", adb, package_name)
+            };
+            println!("⚠️  Launch command failed. Try manually: {}", cmd_str);
+        },
         Err(e) => return Err(format!("Failed to launch app: {}", e).into()),
     }
     

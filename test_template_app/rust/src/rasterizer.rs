@@ -79,8 +79,9 @@ impl<'a> Rasterizer<'a> {
         self.render_to_surface_with_offset(backend, dest, stride, window_width, window_height, 0);
     }
 
-    /// Render with vertical offset (for status bar)
+    /// Render with vertical offsets (for status bar and navigation bar)
     /// top_offset_px: Number of pixels to skip at the top
+    /// bottom_offset_px: Number of pixels to skip at the bottom
     pub fn render_to_surface_with_offset(
         &self, 
         backend: &super::backend::AndroidBackend, 
@@ -89,6 +90,7 @@ impl<'a> Rasterizer<'a> {
         window_width: usize,
         window_height: usize,
         top_offset_px: usize,
+        bottom_offset_px: usize,
     ) {
         // Safety check: ensure we have enough buffer space
         // Buffer size is stride * height * 4 (stride includes padding)
@@ -101,18 +103,23 @@ impl<'a> Rasterizer<'a> {
         // ROW-BY-ROW RENDERING APPROACH
         // Render entire rows at once for safer sequential memory access
         
+        // Calculate the maximum pixel Y we can render to (excluding bottom offset)
+        let max_render_height = window_height.saturating_sub(bottom_offset_px);
+        
         // Iterate row by row (by terminal row, not pixel row)
         for term_y in 0..backend.height {
             let py_start = (term_y as f32 * self.font_height) as usize + top_offset_px;
             
-            // Skip if this row would be out of bounds
-            if py_start >= window_height {
+            // Skip if this row would be out of bounds (above top offset or below bottom offset)
+            if py_start >= max_render_height {
                 continue;
             }
             
             // Calculate how many pixel rows this terminal row spans
-            let py_end = ((term_y + 1) as f32 * self.font_height) as usize;
-            let row_height = (py_end - py_start).min(window_height - py_start);
+            // Make sure we don't exceed the maximum render height (window_height - bottom_offset)
+            let py_end_content = ((term_y + 1) as f32 * self.font_height) as usize;
+            let py_end = py_end_content.saturating_add(top_offset_px);
+            let row_height = (py_end - py_start).min(max_render_height.saturating_sub(py_start));
             
             if row_height == 0 {
                 continue;

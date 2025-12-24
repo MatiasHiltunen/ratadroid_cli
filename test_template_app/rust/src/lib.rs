@@ -57,6 +57,7 @@ struct AppState {
     native_window: Option<NativeWindow>,
     todo_app: todo_app::TodoApp,
     top_offset_rows: u16, // Number of rows to skip at top for status bar
+    bottom_offset_rows: u16, // Number of rows to skip at bottom for navigation bar
     orientation: Orientation, // Current screen orientation
 }
 
@@ -113,6 +114,7 @@ pub extern "C" fn android_main(app: AndroidApp) {
         native_window: None,
         todo_app,
         top_offset_rows: 2, // Default: skip 2 rows at top for status bar
+        bottom_offset_rows: 2, // Default: skip 2 rows at bottom for navigation bar
         orientation: Orientation::Portrait, // Default orientation
     };
 
@@ -120,9 +122,17 @@ pub extern "C" fn android_main(app: AndroidApp) {
     loop {
         // Poll input events first - this prevents ANR (Application Not Responding)
         if let Ok(mut input_iter) = app.input_events_iter() {
+            // Get window height for input coordinate adjustment
+            let window_height = if let Some(ref window) = state.native_window {
+                window.height() as f32
+            } else {
+                0.0
+            };
+            
             while input_iter.next(|input_event| {
-                // Calculate top offset in pixels for input coordinate adjustment
+                // Calculate offsets in pixels for input coordinate adjustment
                 let top_offset_px = state.top_offset_rows as f32 * state.rasterizer.font_height();
+                let bottom_offset_px = state.bottom_offset_rows as f32 * state.rasterizer.font_height();
                 
                 // Map Android Input -> TUI Event
                 match input::map_android_event(
@@ -132,6 +142,8 @@ pub extern "C" fn android_main(app: AndroidApp) {
                     state.rasterizer.font_width(),
                     state.rasterizer.font_height(),
                     top_offset_px,
+                    bottom_offset_px,
+                    window_height,
                 ) {
                     Some(tui_event) => {
                         // Handle mouse clicks on buttons
@@ -501,13 +513,17 @@ fn resize_backend(state: &mut AppState, window: &NativeWindow) {
     let status_bar_rows = ((status_bar_height_px / state.rasterizer.font_height()) as u16).max(2);
     state.top_offset_rows = status_bar_rows.min(total_rows / 4); // Don't use more than 25% of screen
     
-    // Available rows for content (excluding status bar)
-    let available_rows = total_rows.saturating_sub(state.top_offset_rows);
+    // Reserve bottom rows for navigation bar (gesture bar, etc.)
+    // Navigation bar is typically similar height to status bar
+    state.bottom_offset_rows = 2; // Use 2 rows at bottom
+    
+    // Available rows for content (excluding status bar and navigation bar)
+    let available_rows = total_rows.saturating_sub(state.top_offset_rows).saturating_sub(state.bottom_offset_rows);
     
     if cols > 0 && available_rows > 0 {
         state.terminal.backend_mut().resize(cols, available_rows);
-        info!("Resized terminal to {}x{} (window: {}x{}, top offset: {} rows, orientation: {:?})", 
-              cols, available_rows, width_px, height_px, state.top_offset_rows, state.orientation);
+        info!("Resized terminal to {}x{} (window: {}x{}, top offset: {} rows, bottom offset: {} rows, orientation: {:?})", 
+              cols, available_rows, width_px, height_px, state.top_offset_rows, state.bottom_offset_rows, state.orientation);
         // Force a full redraw
         let _ = state.terminal.clear();
     }
@@ -575,11 +591,12 @@ fn draw_tui(state: &mut AppState, window: &NativeWindow) {
                     std::slice::from_raw_parts_mut(bits_ptr as *mut u8, max_buffer_size_bytes)
                 };
                 
-                // Calculate top offset in pixels for status bar
+                // Calculate offsets in pixels for status bar and navigation bar
                 let top_offset_px = (state.top_offset_rows as f32 * state.rasterizer.font_height()) as usize;
+                let bottom_offset_px = (state.bottom_offset_rows as f32 * state.rasterizer.font_height()) as usize;
                 
                 // Render to full buffer, but offset the rendering position
-                // The rasterizer will render starting at top_offset_px
+                // The rasterizer will render starting at top_offset_px and stop before bottom_offset_px
                 state.rasterizer.render_to_surface_with_offset(
                     state.terminal.backend(),
                     pixels_mut,
@@ -587,6 +604,7 @@ fn draw_tui(state: &mut AppState, window: &NativeWindow) {
                     safe_width,     // Use safe_width for bounds checking
                     safe_height,    // Use full safe_height
                     top_offset_px,  // Offset to skip status bar
+                    bottom_offset_px, // Offset to skip navigation bar
                 );
             }
             

@@ -21,6 +21,17 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // Sign release builds with debug keystore for development/testing
+            // For production, configure a proper release keystore
+            signingConfig signingConfigs.debug
+        }
+    }
+    
+    signingConfigs {
+        debug {
+            // Use default debug keystore location
+            // On Linux/Mac: ~/.android/debug.keystore
+            // On Windows: %USERPROFILE%\.android\debug.keystore
         }
     }
     

@@ -40,6 +40,8 @@ pub fn map_android_event(
     font_width: f32,
     font_height: f32,
     top_offset_px: f32, // Top offset in pixels (for status bar)
+    bottom_offset_px: f32, // Bottom offset in pixels (for navigation bar)
+    window_height: f32, // Total window height in pixels
 ) -> Option<Event> {
     match event {
         InputEvent::KeyEvent(key) => {
@@ -58,7 +60,16 @@ pub fn map_android_event(
             
             // Map Pixel coordinates to Grid coordinates
             // Subtract top offset to account for status bar
+            // Also check that we're not in the bottom offset area
             let adjusted_y = (pointer.y() - top_offset_px).max(0.0);
+            
+            // Check if touch is in the bottom offset area (navigation bar)
+            let max_content_y = window_height - bottom_offset_px;
+            if pointer.y() >= max_content_y {
+                // Touch is in the bottom offset area, ignore it
+                return None;
+            }
+            
             let col = (pointer.x() / font_width) as u16;
             let row = (adjusted_y / font_height) as u16;
 

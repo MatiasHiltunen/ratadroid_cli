@@ -11,7 +11,7 @@ mod rasterizer;
 mod input;
 
 #[cfg(target_os = "android")]
-use android_activity::{AndroidApp, MainEvent, PollEvent};
+use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
 #[cfg(target_os = "android")]
 use android_logger::Config;
 #[cfg(target_os = "android")]
@@ -19,7 +19,13 @@ use log::{info, warn};
 #[cfg(target_os = "android")]
 use ndk::native_window::NativeWindow;
 #[cfg(target_os = "android")]
-use ndk_sys::ANativeWindow_setBuffersGeometry;
+use ndk_sys::{ANativeWindow_setBuffersGeometry, ANativeActivity};
+#[cfg(target_os = "android")]
+use jni::{JNIEnv, objects::JObject};
+#[cfg(target_os = "android")]
+use jni::sys::{jint, jobject};
+#[cfg(target_os = "android")]
+use ndk::native_activity::NativeActivity;
 #[cfg(target_os = "android")]
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin},
@@ -36,6 +42,14 @@ use std::time::Duration;
 const FONT_DATA: &[u8] = include_bytes!("../fonts/Hack-Regular.ttf");
 const FONT_SIZE: f32 = 36.0; // Larger text for mobile screens
 
+/// Screen orientation
+#[cfg(target_os = "android")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Orientation {
+    Portrait,
+    Landscape,
+}
+
 /// Application state structure
 #[cfg(target_os = "android")]
 struct AppState {
@@ -43,6 +57,9 @@ struct AppState {
     rasterizer: rasterizer::Rasterizer<'static>,
     should_quit: bool,
     native_window: Option<NativeWindow>,
+    top_offset_rows: u16, // Number of rows to skip at top for status bar
+    bottom_offset_rows: u16, // Number of rows to skip at bottom for navigation bar
+    orientation: Orientation, // Current screen orientation
 }
 
 /// Android NativeActivity entry point
@@ -50,6 +67,7 @@ struct AppState {
 /// to this function automatically
 #[cfg(target_os = "android")]
 #[no_mangle]
+#[allow(improper_ctypes_definitions)]
 pub extern "C" fn android_main(app: AndroidApp) {
     android_logger::init_once(Config::default().with_max_level(log::LevelFilter::Info));
     info!("Ratatui Android Runtime starting");
@@ -69,15 +87,63 @@ pub extern "C" fn android_main(app: AndroidApp) {
     
     // Initialize Ratatui backend with dummy size (will resize on window init)
     let backend = backend::AndroidBackend::new(1, 1);
+    let mut input_state = input::InputState::new();
     let mut state = AppState {
         terminal: Terminal::new(backend).unwrap(),
         rasterizer,
         should_quit: false,
         native_window: None,
+        top_offset_rows: 2, // Default: skip 2 rows at top for status bar
+        bottom_offset_rows: 2, // Default: skip 2 rows at bottom for navigation bar
+        orientation: Orientation::Portrait, // Default orientation
     };
 
     // Main event loop
     loop {
+        // Poll input events first - this prevents ANR (Application Not Responding)
+        if let Ok(mut input_iter) = app.input_events_iter() {
+            // Get window height for input coordinate adjustment
+            let window_height = if let Some(ref window) = state.native_window {
+                window.height() as f32
+            } else {
+                0.0
+            };
+            
+            while input_iter.next(|input_event| {
+                // Calculate offsets in pixels for input coordinate adjustment
+                let top_offset_px = state.top_offset_rows as f32 * state.rasterizer.font_height();
+                let bottom_offset_px = state.bottom_offset_rows as f32 * state.rasterizer.font_height();
+                
+                // Map Android Input -> TUI Event
+                match input::map_android_event(
+                    input_event,
+                    &app,
+                    &mut input_state,
+                    state.rasterizer.font_width(),
+                    state.rasterizer.font_height(),
+                    top_offset_px,
+                    bottom_offset_px,
+                    window_height,
+                ) {
+                    Some(tui_event) => {
+                        // Handle the event - you can add your own event handling logic here
+                        // For example, check for quit key, update app state, etc.
+                        // Example: if matches!(tui_event, Event::Key(KeyEvent { code: KeyCode::Char('q'), .. })) {
+                        //     state.should_quit = true;
+                        // }
+                    }
+                    None => {
+                        // Event not mapped (e.g., unsupported key or motion action)
+                        // This is fine, we just ignore it
+                    }
+                }
+                // Return Handled to acknowledge we processed the event (prevents ANR)
+                InputStatus::Handled
+            }) {
+                // Continue processing events
+            }
+        }
+        
         app.poll_events(Some(Duration::from_millis(16)), |event| {
             match event {
                 PollEvent::Main(main_event) => {
@@ -102,7 +168,81 @@ pub extern "C" fn android_main(app: AndroidApp) {
         }
     }
     
-    info!("Ratatui Android Runtime exiting");
+            info!("Ratatui Android Runtime exiting");
+        }
+
+/// Show the Android soft keyboard by calling Java method via JNI
+/// Uses ndk-glue to access ANativeActivity
+#[cfg(target_os = "android")]
+fn show_soft_keyboard(_app: &AndroidApp) {
+    info!("show_soft_keyboard() called - attempting to show keyboard");
+    
+    unsafe {
+        // Use ndk-glue to get NativeActivity
+        // Note: ndk-glue should be initialized by android-activity
+        let native_activity = ndk_glue::native_activity();
+        
+        // Get Java VM from NativeActivity
+        let vm = native_activity.vm();
+        if vm.is_null() {
+            warn!("Java VM is null from ndk-glue");
+            return;
+        }
+        info!("Got Java VM from ndk-glue");
+        
+        // Get Activity object (Java object) from NativeActivity
+        let activity_obj = native_activity.activity();
+        if activity_obj.is_null() {
+            warn!("Activity object is null from ndk-glue");
+            return;
+        }
+        info!("Got Activity object from ndk-glue");
+        
+        // Attach to Java VM
+        let vm = match jni::JavaVM::from_raw(vm as *mut _) {
+            Ok(vm) => vm,
+            Err(e) => {
+                warn!("Failed to create JavaVM: {:?}", e);
+                return;
+            }
+        };
+        info!("Created JavaVM from raw pointer");
+        
+        let mut env = match vm.attach_current_thread_permanently() {
+            Ok(env) => env,
+            Err(e) => {
+                warn!("Failed to attach to Java VM: {:?}", e);
+                return;
+            }
+        };
+        info!("Attached to Java VM thread");
+        
+        let activity_jobj = JObject::from_raw(activity_obj as jobject);
+        info!("Created JObject from activity pointer");
+        
+        // Call showSoftKeyboard() method on NativeActivity
+        info!("Calling showSoftKeyboard() method");
+        match env.call_method(
+            activity_jobj,
+            "showSoftKeyboard",
+            "()V",
+            &[]
+        ) {
+            Ok(_) => {
+                info!("Soft keyboard shown successfully via Java method");
+            }
+            Err(e) => {
+                warn!("Failed to call showSoftKeyboard: {:?}", e);
+                // Try to get more details about the error
+                if env.exception_check().unwrap_or(false) {
+                    if let Err(detail_err) = env.exception_describe() {
+                        warn!("Also failed to describe exception: {:?}", detail_err);
+                    }
+                    env.exception_clear().ok();
+                }
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "android")]
@@ -134,15 +274,55 @@ fn handle_lifecycle(state: &mut AppState, app: &AndroidApp, event: MainEvent) {
                 }
                 
                 state.native_window = Some(win.clone());
+                
+                // Detect initial orientation
+                let width = win.width();
+                let height = win.height();
+                state.orientation = if width > height {
+                    Orientation::Landscape
+                } else {
+                    Orientation::Portrait
+                };
+                info!("Initial orientation: {:?} ({}x{})", state.orientation, width, height);
+                
                 // Resize backend to match window
                 resize_backend(state, win);
             }
         }
         MainEvent::WindowResized { .. } | MainEvent::ConfigChanged { .. } => {
-            info!("Window resized or config changed");
+            info!("Window resized or config changed (orientation/keyboard)");
             // Re-measure grid - clone window to avoid borrow checker issues
             let window = state.native_window.clone();
             if let Some(w) = window {
+                // Detect orientation change
+                let width = w.width();
+                let height = w.height();
+                let new_orientation = if width > height {
+                    Orientation::Landscape
+                } else {
+                    Orientation::Portrait
+                };
+                
+                // Log orientation change if it changed
+                if state.orientation != new_orientation {
+                    info!("Orientation changed: {:?} -> {:?} ({}x{})", 
+                          state.orientation, new_orientation, width, height);
+                    state.orientation = new_orientation;
+                }
+                
+                // Update buffer geometry if needed
+                unsafe {
+                    let native_window_ptr = w.ptr().as_ptr() as *mut ndk_sys::ANativeWindow;
+                    let result = ANativeWindow_setBuffersGeometry(
+                        native_window_ptr,
+                        width as i32,
+                        height as i32,
+                        1, // WINDOW_FORMAT_RGBA_8888
+                    );
+                    if result != 0 {
+                        warn!("Failed to update buffer format on resize, result code: {}", result);
+                    }
+                }
                 resize_backend(state, &w);
             }
         }
@@ -161,11 +341,26 @@ fn resize_backend(state: &mut AppState, window: &NativeWindow) {
     
     // Calculate how many characters fit
     let cols = (width_px / state.rasterizer.font_width()) as u16;
-    let rows = (height_px / state.rasterizer.font_height()) as u16;
+    let total_rows = (height_px / state.rasterizer.font_height()) as u16;
     
-    if cols > 0 && rows > 0 {
-        state.terminal.backend_mut().resize(cols, rows);
-        info!("Resized terminal to {}x{} (window: {}x{})", cols, rows, width_px, height_px);
+    // Reserve top rows for status bar (clock, battery, etc.)
+    // Status bar is typically 24-48dp, which is roughly 2-3 rows at typical font sizes
+    // We'll use 2 rows as default, but calculate based on available space
+    let status_bar_height_px = 48.0; // Approximate status bar height in pixels
+    let status_bar_rows = ((status_bar_height_px / state.rasterizer.font_height()) as u16).max(2);
+    state.top_offset_rows = status_bar_rows.min(total_rows / 4); // Don't use more than 25% of screen
+    
+    // Reserve bottom rows for navigation bar (gesture bar, etc.)
+    // Navigation bar is typically similar height to status bar
+    state.bottom_offset_rows = 2; // Use 2 rows at bottom
+    
+    // Available rows for content (excluding status bar and navigation bar)
+    let available_rows = total_rows.saturating_sub(state.top_offset_rows).saturating_sub(state.bottom_offset_rows);
+    
+    if cols > 0 && available_rows > 0 {
+        state.terminal.backend_mut().resize(cols, available_rows);
+        info!("Resized terminal to {}x{} (window: {}x{}, top offset: {} rows, bottom offset: {} rows, orientation: {:?})", 
+              cols, available_rows, width_px, height_px, state.top_offset_rows, state.bottom_offset_rows, state.orientation);
         // Force a full redraw
         let _ = state.terminal.clear();
     }
@@ -277,14 +472,20 @@ fn draw_tui(state: &mut AppState, window: &NativeWindow) {
                     std::slice::from_raw_parts_mut(bits_ptr as *mut u8, max_buffer_size_bytes)
                 };
                 
-                // Rasterize cells to pixels
-                // Pass both stride (for buffer layout) and safe_width (for bounds checking)
-                state.rasterizer.render_to_surface(
+                // Calculate offsets in pixels for status bar and navigation bar
+                let top_offset_px = (state.top_offset_rows as f32 * state.rasterizer.font_height()) as usize;
+                let bottom_offset_px = (state.bottom_offset_rows as f32 * state.rasterizer.font_height()) as usize;
+                
+                // Render to full buffer, but offset the rendering position
+                // The rasterizer will render starting at top_offset_px and stop before bottom_offset_px
+                state.rasterizer.render_to_surface_with_offset(
                     state.terminal.backend(),
                     pixels_mut,
                     stride,         // Use stride for buffer layout
                     safe_width,     // Use safe_width for bounds checking
-                    safe_height,    // Use safe_height for bounds checking
+                    safe_height,    // Use full safe_height
+                    top_offset_px,  // Offset to skip status bar
+                    bottom_offset_px, // Offset to skip navigation bar
                 );
             }
             

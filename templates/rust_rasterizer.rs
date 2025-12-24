@@ -4,7 +4,6 @@
 
 use ab_glyph::{Font, FontRef, PxScale};
 use ratatui::style::Color;
-use ratatui::buffer::Cell;
 use log;
 
 pub struct Rasterizer<'a> {
@@ -44,12 +43,14 @@ impl<'a> Rasterizer<'a> {
 
     /// Create a fallback rasterizer when font loading fails
     /// This uses simple block rendering instead of font glyphs
+    #[allow(invalid_value)]
     pub fn new_fallback(size: f32) -> Self {
         // Create a dummy font reference - we won't use it, but need it for the struct
         // We'll detect font loading failure in draw_char and use block rendering
         let dummy_font_data = b"dummy";
         let font = FontRef::try_from_slice(dummy_font_data).unwrap_or_else(|_| {
             // If even dummy fails, create a zeroed font (we'll handle this in draw_char)
+            // SAFETY: This is a fallback path - we check for null font in draw_char
             unsafe { std::mem::zeroed() }
         });
         
@@ -66,6 +67,7 @@ impl<'a> Rasterizer<'a> {
     /// stride: Buffer stride in pixels (for calculating byte offsets)
     /// window_width: Window width in pixels (for bounds checking)
     /// window_height: Window height in pixels
+    #[allow(dead_code)] // Public API method, kept for convenience
     pub fn render_to_surface(
         &self, 
         backend: &super::backend::AndroidBackend, 
@@ -73,6 +75,22 @@ impl<'a> Rasterizer<'a> {
         stride: usize,
         window_width: usize,
         window_height: usize,
+    ) {
+        self.render_to_surface_with_offset(backend, dest, stride, window_width, window_height, 0, 0);
+    }
+
+    /// Render with vertical offsets (for status bar and navigation bar)
+    /// top_offset_px: Number of pixels to skip at the top
+    /// bottom_offset_px: Number of pixels to skip at the bottom
+    pub fn render_to_surface_with_offset(
+        &self, 
+        backend: &super::backend::AndroidBackend, 
+        dest: &mut [u8], 
+        stride: usize,
+        window_width: usize,
+        window_height: usize,
+        top_offset_px: usize,
+        bottom_offset_px: usize,
     ) {
         // Safety check: ensure we have enough buffer space
         // Buffer size is stride * height * 4 (stride includes padding)
@@ -84,21 +102,24 @@ impl<'a> Rasterizer<'a> {
 
         // ROW-BY-ROW RENDERING APPROACH
         // Render entire rows at once for safer sequential memory access
-        let font_w = self.font_width as usize;
-        let font_h = self.font_height as usize;
+        
+        // Calculate the maximum pixel Y we can render to (excluding bottom offset)
+        let max_render_height = window_height.saturating_sub(bottom_offset_px);
         
         // Iterate row by row (by terminal row, not pixel row)
         for term_y in 0..backend.height {
-            let py_start = (term_y as f32 * self.font_height) as usize;
+            let py_start = (term_y as f32 * self.font_height) as usize + top_offset_px;
             
-            // Skip if this row would be out of bounds
-            if py_start >= window_height {
+            // Skip if this row would be out of bounds (above top offset or below bottom offset)
+            if py_start >= max_render_height {
                 continue;
             }
             
             // Calculate how many pixel rows this terminal row spans
-            let py_end = ((term_y + 1) as f32 * self.font_height) as usize;
-            let row_height = (py_end - py_start).min(window_height - py_start);
+            // Make sure we don't exceed the maximum render height (window_height - bottom_offset)
+            let py_end_content = ((term_y + 1) as f32 * self.font_height) as usize;
+            let py_end = py_end_content.saturating_add(top_offset_px);
+            let row_height = (py_end - py_start).min(max_render_height.saturating_sub(py_start));
             
             if row_height == 0 {
                 continue;
@@ -189,6 +210,7 @@ impl<'a> Rasterizer<'a> {
         }
     }
 
+    #[allow(dead_code)]
     fn draw_rect(
         &self,
         x: usize,
