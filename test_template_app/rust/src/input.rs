@@ -1,17 +1,44 @@
 //! Input adapter that converts Android input events to Ratatui/Crossterm events.
 //! This allows TUI widgets to react to touch and keyboard input naturally.
+//!
+//! Uses Android's KeyCharacterMap for proper international keyboard support,
+//! including combining accents for languages like French, Spanish, etc.
 
 #[cfg(target_os = "android")]
-use android_activity::input::{InputEvent, MotionAction, KeyAction, Keycode};
+use android_activity::input::{InputEvent, KeyMapChar, MotionAction, KeyAction, Keycode, MetaState};
+#[cfg(target_os = "android")]
+use android_activity::AndroidApp;
 #[cfg(target_os = "android")]
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
+/// State for handling combining accents (dead keys) for international keyboards
+pub struct InputState {
+    combining_accent: Option<char>,
+}
+
+impl InputState {
+    pub fn new() -> Self {
+        Self {
+            combining_accent: None,
+        }
+    }
+}
+
 /// Converts raw Android Input to a Ratatui-compatible Event
-pub fn map_android_event(event: &InputEvent, font_width: f32, font_height: f32) -> Option<Event> {
+/// Uses KeyCharacterMap for proper international keyboard support
+pub fn map_android_event(
+    event: &InputEvent,
+    app: &AndroidApp,
+    state: &mut InputState,
+    font_width: f32,
+    font_height: f32,
+) -> Option<Event> {
     match event {
         InputEvent::KeyEvent(key) => {
             if key.action() == KeyAction::Down {
-                map_key_code(key.key_code()).map(Event::Key)
+                let device_id = key.device_id();
+                map_key_code_with_character_map(key.key_code(), key.meta_state(), device_id, app, state)
+                    .map(Event::Key)
             } else {
                 None
             }
@@ -43,36 +70,74 @@ pub fn map_android_event(event: &InputEvent, font_width: f32, font_height: f32) 
     }
 }
 
-fn map_key_code(code: Keycode) -> Option<KeyEvent> {
-    // Basic mapping - expand this for full keyboard support
-    let code = match code {
-        // Letters (lowercase for now - Android keyboard handles case)
-        Keycode::A => KeyCode::Char('a'),
-        Keycode::B => KeyCode::Char('b'),
-        Keycode::C => KeyCode::Char('c'),
-        Keycode::D => KeyCode::Char('d'),
-        Keycode::E => KeyCode::Char('e'),
-        Keycode::F => KeyCode::Char('f'),
-        Keycode::G => KeyCode::Char('g'),
-        Keycode::H => KeyCode::Char('h'),
-        Keycode::I => KeyCode::Char('i'),
-        Keycode::J => KeyCode::Char('j'),
-        Keycode::K => KeyCode::Char('k'),
-        Keycode::L => KeyCode::Char('l'),
-        Keycode::M => KeyCode::Char('m'),
-        Keycode::N => KeyCode::Char('n'),
-        Keycode::O => KeyCode::Char('o'),
-        Keycode::P => KeyCode::Char('p'),
-        Keycode::Q => KeyCode::Char('q'),
-        Keycode::R => KeyCode::Char('r'),
-        Keycode::S => KeyCode::Char('s'),
-        Keycode::T => KeyCode::Char('t'),
-        Keycode::U => KeyCode::Char('u'),
-        Keycode::V => KeyCode::Char('v'),
-        Keycode::W => KeyCode::Char('w'),
-        Keycode::X => KeyCode::Char('x'),
-        Keycode::Y => KeyCode::Char('y'),
-        Keycode::Z => KeyCode::Char('z'),
+/// Maps Android keycode to Ratatui KeyEvent using KeyCharacterMap for international support
+fn map_key_code_with_character_map(
+    key_code: Keycode,
+    meta_state: MetaState,
+    device_id: i32,
+    app: &AndroidApp,
+    state: &mut InputState,
+) -> Option<KeyEvent> {
+    // First, try to get the Unicode character from KeyCharacterMap
+    // This handles international keyboards properly
+    if let Ok(key_map) = app.device_key_character_map(device_id) {
+        match key_map.get(key_code, meta_state) {
+            Ok(KeyMapChar::Unicode(ch)) => {
+                // Handle combining accents (dead keys)
+                let final_char = if let Some(accent) = state.combining_accent {
+                    // Try to combine the accent with the character
+                    match key_map.get_dead_char(accent, ch) {
+                        Ok(Some(combined)) => {
+                            state.combining_accent = None;
+                            combined
+                        }
+                        Ok(None) => {
+                            // Can't combine, use the character as-is
+                            state.combining_accent = None;
+                            ch
+                        }
+                        Err(_) => {
+                            // Error combining, use the character as-is
+                            state.combining_accent = None;
+                            ch
+                        }
+                    }
+                } else {
+                    ch
+                };
+                
+                // Map modifiers
+                let mut modifiers = KeyModifiers::empty();
+                if meta_state.shift_on() {
+                    modifiers |= KeyModifiers::SHIFT;
+                }
+                if meta_state.ctrl_on() {
+                    modifiers |= KeyModifiers::CONTROL;
+                }
+                if meta_state.alt_on() {
+                    modifiers |= KeyModifiers::ALT;
+                }
+                
+                return Some(KeyEvent::new(KeyCode::Char(final_char), modifiers));
+            }
+            Ok(KeyMapChar::CombiningAccent(accent)) => {
+                // Store the combining accent for the next key press
+                state.combining_accent = Some(accent);
+                return None; // Don't emit an event for the accent key itself
+            }
+            Ok(KeyMapChar::None) => {
+                // Not a Unicode character, fall through to special key mapping
+                state.combining_accent = None;
+            }
+            Err(_) => {
+                // Error getting character map, fall through to special key mapping
+                state.combining_accent = None;
+            }
+        }
+    }
+    
+    // Fallback: Map special keys that don't have Unicode characters
+    let code = match key_code {
         // Special keys
         Keycode::Enter => KeyCode::Enter,
         Keycode::Space => KeyCode::Char(' '),
@@ -82,9 +147,26 @@ fn map_key_code(code: Keycode) -> Option<KeyEvent> {
         Keycode::DpadDown => KeyCode::Down,
         Keycode::DpadLeft => KeyCode::Left,
         Keycode::DpadRight => KeyCode::Right,
+        Keycode::Tab => KeyCode::Tab,
+        Keycode::PageUp => KeyCode::PageUp,
+        Keycode::PageDown => KeyCode::PageDown,
+        Keycode::Home => KeyCode::Home,
+        Keycode::Insert => KeyCode::Insert,
         _ => return None,
     };
 
-    Some(KeyEvent::new(code, KeyModifiers::empty()))
+    // Map modifiers
+    let mut modifiers = KeyModifiers::empty();
+    if meta_state.shift_on() {
+        modifiers |= KeyModifiers::SHIFT;
+    }
+    if meta_state.ctrl_on() {
+        modifiers |= KeyModifiers::CONTROL;
+    }
+    if meta_state.alt_on() {
+        modifiers |= KeyModifiers::ALT;
+    }
+
+    Some(KeyEvent::new(code, modifiers))
 }
 

@@ -10,6 +10,8 @@ mod rasterizer;
 #[cfg(target_os = "android")]
 mod input;
 #[cfg(target_os = "android")]
+mod button;
+#[cfg(target_os = "android")]
 mod todo_app;
 
 #[cfg(target_os = "android")]
@@ -27,7 +29,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin},
     style::{Color, Modifier, Style},
     text::Line,
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Terminal,
 };
 #[cfg(target_os = "android")]
@@ -72,6 +74,7 @@ pub extern "C" fn android_main(app: AndroidApp) {
     
     // Initialize Ratatui backend with dummy size (will resize on window init)
     let backend = backend::AndroidBackend::new(1, 1);
+    let mut input_state = input::InputState::new();
     let mut state = AppState {
         terminal: Terminal::new(backend).unwrap(),
         rasterizer,
@@ -88,13 +91,31 @@ pub extern "C" fn android_main(app: AndroidApp) {
                 // Map Android Input -> TUI Event
                 match input::map_android_event(
                     input_event,
+                    &app,
+                    &mut input_state,
                     state.rasterizer.font_width(),
                     state.rasterizer.font_height(),
                 ) {
                     Some(tui_event) => {
-                        // Handle quit
-                        if state.todo_app.handle_event(&tui_event) {
-                            state.should_quit = true;
+                        // Handle mouse clicks on buttons
+                        let mut button_clicked = false;
+                        if let crossterm::event::Event::Mouse(crossterm::event::MouseEvent {
+                            kind: crossterm::event::MouseEventKind::Down(_),
+                            column,
+                            row,
+                            ..
+                        }) = &tui_event {
+                            // Get the terminal size for button click detection
+                            if let Ok(term_size) = state.terminal.size() {
+                                button_clicked = state.todo_app.handle_mouse_click(*column, *row, term_size);
+                            }
+                        }
+                        
+                        // Handle other events (including quit) if button wasn't clicked
+                        if !button_clicked {
+                            if state.todo_app.handle_event(&tui_event) {
+                                state.should_quit = true;
+                            }
                         }
                     }
                     None => {
@@ -209,12 +230,14 @@ fn draw_tui(state: &mut AppState, window: &NativeWindow) {
     let _ = state.terminal.draw(|frame| {
         let area = frame.size();
         
-        // Render the todo app
-        let todo_lines = state.todo_app.render(area);
-        let content = Paragraph::new(todo_lines)
-            .block(Block::default().borders(Borders::ALL).title("Todo App"))
-            .alignment(Alignment::Left);
-        frame.render_widget(content, area);
+        // Render the todo app with buttons
+        state.todo_app.render_frame(frame, area);
+        
+        // Clear button clicked state after rendering (for visual feedback)
+        // This creates a brief flash effect when button is clicked
+        if state.todo_app.button_clicked.is_some() {
+            state.todo_app.button_clicked = None;
+        }
     });
 
     // B. Pixel Blit Pass

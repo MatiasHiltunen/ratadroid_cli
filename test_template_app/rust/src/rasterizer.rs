@@ -386,7 +386,7 @@ impl<'a> Rasterizer<'a> {
             Color::Cyan => [0, 255, 255, 255],
             Color::White => [255, 255, 255, 255],
             Color::Gray => [128, 128, 128, 255],
-            Color::DarkGray => [64, 64, 64, 255],
+            Color::DarkGray => [128, 128, 128, 255], // Lighter gray for better visibility
             Color::LightRed => [255, 128, 128, 255],
             Color::LightGreen => [128, 255, 128, 255],
             Color::LightYellow => [255, 255, 128, 255],
