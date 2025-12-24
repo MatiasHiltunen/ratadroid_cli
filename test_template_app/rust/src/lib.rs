@@ -48,6 +48,7 @@ struct AppState {
     should_quit: bool,
     native_window: Option<NativeWindow>,
     todo_app: todo_app::TodoApp,
+    top_offset_rows: u16, // Number of rows to skip at top for status bar
 }
 
 /// Android NativeActivity entry point
@@ -81,6 +82,7 @@ pub extern "C" fn android_main(app: AndroidApp) {
         should_quit: false,
         native_window: None,
         todo_app: todo_app::TodoApp::new(),
+        top_offset_rows: 2, // Default: skip 2 rows at top for status bar
     };
 
     // Main event loop
@@ -191,10 +193,25 @@ fn handle_lifecycle(state: &mut AppState, app: &AndroidApp, event: MainEvent) {
             }
         }
         MainEvent::WindowResized { .. } | MainEvent::ConfigChanged { .. } => {
-            info!("Window resized or config changed");
+            info!("Window resized or config changed (orientation/keyboard)");
             // Re-measure grid - clone window to avoid borrow checker issues
             let window = state.native_window.clone();
             if let Some(w) = window {
+                // Update buffer geometry if needed
+                let width = w.width();
+                let height = w.height();
+                unsafe {
+                    let native_window_ptr = w.ptr().as_ptr() as *mut ndk_sys::ANativeWindow;
+                    let result = ANativeWindow_setBuffersGeometry(
+                        native_window_ptr,
+                        width as i32,
+                        height as i32,
+                        1, // WINDOW_FORMAT_RGBA_8888
+                    );
+                    if result != 0 {
+                        warn!("Failed to update buffer format on resize, result code: {}", result);
+                    }
+                }
                 resize_backend(state, &w);
             }
         }
@@ -213,11 +230,22 @@ fn resize_backend(state: &mut AppState, window: &NativeWindow) {
     
     // Calculate how many characters fit
     let cols = (width_px / state.rasterizer.font_width()) as u16;
-    let rows = (height_px / state.rasterizer.font_height()) as u16;
+    let total_rows = (height_px / state.rasterizer.font_height()) as u16;
     
-    if cols > 0 && rows > 0 {
-        state.terminal.backend_mut().resize(cols, rows);
-        info!("Resized terminal to {}x{} (window: {}x{})", cols, rows, width_px, height_px);
+    // Reserve top rows for status bar (clock, battery, etc.)
+    // Status bar is typically 24-48dp, which is roughly 2-3 rows at typical font sizes
+    // We'll use 2 rows as default, but calculate based on available space
+    let status_bar_height_px = 48.0; // Approximate status bar height in pixels
+    let status_bar_rows = ((status_bar_height_px / state.rasterizer.font_height()) as u16).max(2);
+    state.top_offset_rows = status_bar_rows.min(total_rows / 4); // Don't use more than 25% of screen
+    
+    // Available rows for content (excluding status bar)
+    let available_rows = total_rows.saturating_sub(state.top_offset_rows);
+    
+    if cols > 0 && available_rows > 0 {
+        state.terminal.backend_mut().resize(cols, available_rows);
+        info!("Resized terminal to {}x{} (window: {}x{}, top offset: {} rows)", 
+              cols, available_rows, width_px, height_px, state.top_offset_rows);
         // Force a full redraw
         let _ = state.terminal.clear();
     }
@@ -284,14 +312,18 @@ fn draw_tui(state: &mut AppState, window: &NativeWindow) {
                     std::slice::from_raw_parts_mut(bits_ptr as *mut u8, max_buffer_size_bytes)
                 };
                 
-                // Rasterize cells to pixels
-                // Pass both stride (for buffer layout) and safe_width (for bounds checking)
-                state.rasterizer.render_to_surface(
+                // Calculate top offset in pixels for status bar
+                let top_offset_px = (state.top_offset_rows as f32 * state.rasterizer.font_height()) as usize;
+                
+                // Render to full buffer, but offset the rendering position
+                // The rasterizer will render starting at top_offset_px
+                state.rasterizer.render_to_surface_with_offset(
                     state.terminal.backend(),
                     pixels_mut,
                     stride,         // Use stride for buffer layout
                     safe_width,     // Use safe_width for bounds checking
-                    safe_height,    // Use safe_height for bounds checking
+                    safe_height,    // Use full safe_height
+                    top_offset_px,  // Offset to skip status bar
                 );
             }
             

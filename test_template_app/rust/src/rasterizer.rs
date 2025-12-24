@@ -74,6 +74,20 @@ impl<'a> Rasterizer<'a> {
         window_width: usize,
         window_height: usize,
     ) {
+        self.render_to_surface_with_offset(backend, dest, stride, window_width, window_height, 0);
+    }
+
+    /// Render with vertical offset (for status bar)
+    /// top_offset_px: Number of pixels to skip at the top
+    pub fn render_to_surface_with_offset(
+        &self, 
+        backend: &super::backend::AndroidBackend, 
+        dest: &mut [u8], 
+        stride: usize,
+        window_width: usize,
+        window_height: usize,
+        top_offset_px: usize,
+    ) {
         // Safety check: ensure we have enough buffer space
         // Buffer size is stride * height * 4 (stride includes padding)
         let expected_buffer_size = stride * window_height * 4;
@@ -89,7 +103,7 @@ impl<'a> Rasterizer<'a> {
         
         // Iterate row by row (by terminal row, not pixel row)
         for term_y in 0..backend.height {
-            let py_start = (term_y as f32 * self.font_height) as usize;
+            let py_start = (term_y as f32 * self.font_height) as usize + top_offset_px;
             
             // Skip if this row would be out of bounds
             if py_start >= window_height {
@@ -181,8 +195,28 @@ impl<'a> Rasterizer<'a> {
                     }
                     
                     // Now draw the character on top (if not a space)
+                    // Adjust vertical position to account for font baseline
+                    // Font glyphs have negative min.y offsets (they extend above baseline)
+                    // We need to shift the character down to align with the cell
                     if ch != ' ' {
-                        self.draw_char(ch, px_start, py_start, fg_color, dest, stride, window_width, window_height);
+                        // Calculate baseline offset from font metrics
+                        // Most fonts have min.y around -font_height * 0.75 to -font_height * 0.85
+                        // This represents how far above the baseline the tallest character extends
+                        let scale = PxScale::from(self.font_size);
+                        let glyph = self.font.glyph_id('M').with_scale(scale); // Use 'M' as reference
+                        let baseline_offset = if let Some(outlined) = self.font.outline_glyph(glyph) {
+                            let bounds = outlined.px_bounds();
+                            // bounds.min.y is negative, so we add its absolute value to shift down
+                            // This aligns the character's visual top with the cell top
+                            (-bounds.min.y).max(0.0) as usize
+                        } else {
+                            // Fallback: estimate baseline offset as ~20% of font height
+                            (self.font_height * 0.2) as usize
+                        };
+                        // Draw character aligned to cell top + baseline offset
+                        // This ensures the character appears at the correct vertical position
+                        let char_y = py_start.saturating_add(baseline_offset);
+                        self.draw_char(ch, px_start, char_y, fg_color, dest, stride, window_width, window_height);
                     }
                 }
             }

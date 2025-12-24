@@ -223,12 +223,8 @@ impl TodoApp {
         };
         
         if let Some(input) = textarea_input {
-            // Handle Esc to exit insert mode
+            // Handle Esc or Back button to exit insert mode (discard changes)
             if input.key == Key::Esc {
-                let text = self.textarea.lines().join("\n").trim().to_string();
-                if !text.is_empty() {
-                    self.add_todo();
-                }
                 self.textarea = TextArea::default(); // Reset textarea
                 self.input_mode = InputMode::Normal;
                 return false;
@@ -460,7 +456,43 @@ impl TodoApp {
     pub fn handle_mouse_click(&mut self, x: u16, y: u16, area: Rect) -> bool {
         use super::button::Button;
         
-        // Calculate button areas (same layout as render_frame)
+        // If in insert mode, check if click is outside textarea area
+        if matches!(self.input_mode, InputMode::Insert) {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3), // Header
+                    Constraint::Min(0),    // Todo list / Textarea
+                    Constraint::Length(5), // Buttons
+                ])
+                .split(area);
+            
+            let textarea_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(0),    // Textarea
+                    Constraint::Length(1),  // Instructions
+                ])
+                .split(chunks[1]);
+            
+            // Check if click is outside textarea area
+            let textarea_rect = textarea_chunks[0];
+            if !(textarea_rect.x <= x && x < textarea_rect.x + textarea_rect.width &&
+                 textarea_rect.y <= y && y < textarea_rect.y + textarea_rect.height) {
+                // Click outside textarea - exit insert mode
+                let text = self.textarea.lines().join("\n").trim().to_string();
+                if !text.is_empty() {
+                    self.add_todo();
+                }
+                self.textarea = TextArea::default();
+                self.input_mode = InputMode::Normal;
+                return true;
+            }
+            // Click inside textarea - let textarea handle it (for now, do nothing)
+            return false;
+        }
+        
+        // Normal mode - handle button clicks and todo selection
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
