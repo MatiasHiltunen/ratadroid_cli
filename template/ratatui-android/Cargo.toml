@@ -40,7 +40,7 @@ log = "0.4"
 unicode-width = "0.2"
 
 # Crossterm for event types (used by input module)
-crossterm = { version = "0.28", default-features = false, features = ["events"] }
+crossterm = { version = "0.29", default-features = false, features = ["events"] }
 
 # Optional: Android native rendering dependencies
 jni = { version = "0.21", optional = true }

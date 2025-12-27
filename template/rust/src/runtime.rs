@@ -34,6 +34,10 @@ static KEYBOARD_VISIBILITY_CHANGED: std::sync::atomic::AtomicBool =
 static KEYBOARD_VISIBLE_HEIGHT: std::sync::atomic::AtomicU32 = 
     std::sync::atomic::AtomicU32::new(0);
 
+/// Track if the soft keyboard is currently visible
+static SOFT_KEYBOARD_VISIBLE: std::sync::atomic::AtomicBool = 
+    std::sync::atomic::AtomicBool::new(false);
+
 /// JNI callback from Java when keyboard visibility changes
 /// Java signature: private native void notifyKeyboardVisibilityChanged(boolean visible, int visibleHeight);
 #[unsafe(no_mangle)]
@@ -46,7 +50,13 @@ pub extern "C" fn Java_com_ratadroid_ratadroid_1template_NativeActivity_notifyKe
     let is_visible = visible != 0;
     log::info!("JNI: Keyboard visibility changed - visible={}, height={}px", is_visible, visible_height);
     KEYBOARD_VISIBLE_HEIGHT.store(visible_height as u32, std::sync::atomic::Ordering::SeqCst);
+    SOFT_KEYBOARD_VISIBLE.store(is_visible, std::sync::atomic::Ordering::SeqCst);
     KEYBOARD_VISIBILITY_CHANGED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Check if the Android soft keyboard is currently visible
+pub fn is_soft_keyboard_visible() -> bool {
+    SOFT_KEYBOARD_VISIBLE.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// Get font size from environment or use default
@@ -129,7 +139,7 @@ pub extern "C" fn android_main(android_app: AndroidApp) {
     }
 }
 
-async fn async_main(android_app: AndroidApp, mut app: Box<dyn RatadroidApp>) -> anyhow::Result<()> {
+async fn async_main(android_app: AndroidApp, app: Box<dyn RatadroidApp>) -> anyhow::Result<()> {
     info!("Initializing...");
     
     let font_size = get_font_size();
@@ -266,6 +276,29 @@ async fn async_main(android_app: AndroidApp, mut app: Box<dyn RatadroidApp>) -> 
                 
                 // Handle other input events
                 if !keyboard_handled {
+                    // Special handling for Back button
+                    if let InputEvent::KeyEvent(key) = input_event {
+                        use android_activity::input::{KeyAction, Keycode};
+                        if key.action() == KeyAction::Down && key.key_code() == Keycode::Back {
+                            // If soft keyboard is visible, hide it instead of quitting
+                            if is_soft_keyboard_visible() {
+                                info!("Back pressed: hiding soft keyboard");
+                                hide_soft_keyboard(&android_app);
+                                return InputStatus::Handled;
+                            }
+                            // Otherwise, let the app handle the back button (or quit)
+                            info!("Back pressed: keyboard not visible, sending Esc to app");
+                            let esc_event = CrosstermEvent::Key(CrosstermKeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+                            let mut ctx = create_context(&state);
+                            state.app.handle_event(esc_event, &mut ctx);
+                            if ctx.should_quit {
+                                state.should_quit = true;
+                            }
+                            state.needs_draw = ctx.needs_draw || state.needs_draw;
+                            return InputStatus::Handled;
+                        }
+                    }
+                    
                     if let Some(crossterm_event) = map_android_event(
                         input_event,
                         &android_app,
@@ -706,7 +739,7 @@ pub fn get_android_data_dir(_app: &AndroidApp) -> Option<PathBuf> {
     }
 }
 
-/// Show the Android soft keyboard
+/// Show the Android soft keyboard by calling a method on our NativeActivity
 pub fn show_soft_keyboard(_app: &AndroidApp) {
     use ndk_context::android_context;
     
@@ -715,41 +748,110 @@ pub fn show_soft_keyboard(_app: &AndroidApp) {
     let context_obj = ctx.context();
     
     if vm_ptr.is_null() || context_obj.is_null() {
+        warn!("Cannot show keyboard: Android context not available");
         return;
     }
     
     unsafe {
         let vm = match jni::JavaVM::from_raw(vm_ptr as *mut _) {
             Ok(vm) => vm,
-            Err(_) => return,
+            Err(e) => {
+                warn!("Failed to get JavaVM: {:?}", e);
+                return;
+            }
         };
         
         let mut env = match vm.attach_current_thread() {
             Ok(env) => env,
-            Err(_) => return,
+            Err(e) => {
+                warn!("Failed to attach thread: {:?}", e);
+                return;
+            }
         };
         
         let context_jobj = JObject::from_raw(context_obj as jobject);
         
-        let input_method_service = match env.new_string("input_method") {
-            Ok(s) => s,
-            Err(_) => return,
+        // Call our custom method on NativeActivity that runs on UI thread
+        match env.call_method(&context_jobj, "showSoftKeyboard", "()V", &[]) {
+            Ok(_) => {
+                info!("Requested soft keyboard show");
+            }
+            Err(e) => {
+                warn!("Failed to call showSoftKeyboard: {:?}", e);
+                // Fallback: try the old approach with toggleSoftInput
+                if let Ok(input_method_service) = env.new_string("input_method") {
+                    if let Ok(obj) = env.call_method(
+                        &context_jobj,
+                        "getSystemService",
+                        "(Ljava/lang/String;)Ljava/lang/Object;",
+                        &[(&input_method_service).into()]
+                    ) {
+                        if let Ok(imm_obj) = obj.l() {
+                            let _ = env.call_method(imm_obj, "toggleSoftInput", "(II)V", &[2i32.into(), 0i32.into()]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Hide the Android soft keyboard
+pub fn hide_soft_keyboard(_app: &AndroidApp) {
+    use ndk_context::android_context;
+    
+    let ctx = android_context();
+    let vm_ptr = ctx.vm();
+    let context_obj = ctx.context();
+    
+    if vm_ptr.is_null() || context_obj.is_null() {
+        warn!("Cannot hide keyboard: Android context not available");
+        return;
+    }
+    
+    unsafe {
+        let vm = match jni::JavaVM::from_raw(vm_ptr as *mut _) {
+            Ok(vm) => vm,
+            Err(e) => {
+                warn!("Failed to get JavaVM: {:?}", e);
+                return;
+            }
         };
         
-        let imm_obj = match env.call_method(
-            context_jobj,
-            "getSystemService",
-            "(Ljava/lang/String;)Ljava/lang/Object;",
-            &[(&input_method_service).into()]
-        ) {
-            Ok(obj) => match obj.l() {
-                Ok(o) => o,
-                Err(_) => return,
-            },
-            Err(_) => return,
+        let mut env = match vm.attach_current_thread() {
+            Ok(env) => env,
+            Err(e) => {
+                warn!("Failed to attach thread: {:?}", e);
+                return;
+            }
         };
         
-        let _ = env.call_method(imm_obj, "toggleSoftInput", "(II)V", &[2i32.into(), 0i32.into()]);
+        let context_jobj = JObject::from_raw(context_obj as jobject);
+        
+        // Call our custom method on NativeActivity that runs on UI thread
+        match env.call_method(&context_jobj, "hideSoftKeyboard", "()V", &[]) {
+            Ok(_) => {
+                info!("Requested soft keyboard hide");
+            }
+            Err(e) => {
+                warn!("Failed to call hideSoftKeyboard: {:?}", e);
+                // Fallback: try to hide via InputMethodManager
+                if let Ok(input_method_service) = env.new_string("input_method") {
+                    if let Ok(obj) = env.call_method(
+                        &context_jobj,
+                        "getSystemService",
+                        "(Ljava/lang/String;)Ljava/lang/Object;",
+                        &[(&input_method_service).into()]
+                    ) {
+                        if let Ok(imm_obj) = obj.l() {
+                            // hideSoftInputFromWindow needs a window token, which is harder to get
+                            // Instead, toggle it off if it's on
+                            let _ = env.call_method(imm_obj, "toggleSoftInput", "(II)V", &[0i32.into(), 0i32.into()]);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

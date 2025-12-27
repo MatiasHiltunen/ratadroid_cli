@@ -84,17 +84,54 @@ public class NativeActivity extends android.app.NativeActivity {
     private native void notifyKeyboardVisibilityChanged(boolean visible, int visibleHeight);
 
     // Method to show soft keyboard - called from native code via JNI
+    // Must be run on UI thread for IMM methods to work correctly
     public void showSoftKeyboard() {
         android.util.Log.d("NativeActivity", "showSoftKeyboard() called from native code");
-        InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
-        if (imm != null) {
-            View view = getWindow().getDecorView();
-            if (view != null) {
-                view.requestFocus();
-                boolean result = imm.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT);
-                android.util.Log.d("NativeActivity", "showSoftInput returned: " + result);
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+                    if (imm != null) {
+                        View view = getWindow().getDecorView();
+                        if (view != null) {
+                            view.requestFocus();
+                            boolean result = imm.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT);
+                            android.util.Log.d("NativeActivity", "showSoftInput returned: " + result);
+                            if (!result) {
+                                // Try the toggle method as fallback
+                                imm.toggleSoftInput(InputMethodManager.SHOW_FORCED, 0);
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    android.util.Log.e("NativeActivity", "Error showing keyboard: " + e.getMessage());
+                }
             }
-        }
+        });
+    }
+    
+    // Method to hide soft keyboard - called from native code via JNI
+    // Must be run on UI thread for IMM methods to work correctly
+    public void hideSoftKeyboard() {
+        android.util.Log.d("NativeActivity", "hideSoftKeyboard() called from native code");
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+                    if (imm != null) {
+                        View view = getWindow().getDecorView();
+                        if (view != null) {
+                            imm.hideSoftInputFromWindow(view.getWindowToken(), 0);
+                            android.util.Log.d("NativeActivity", "hideSoftInputFromWindow called");
+                        }
+                    }
+                } catch (Exception e) {
+                    android.util.Log.e("NativeActivity", "Error hiding keyboard: " + e.getMessage());
+                }
+            }
+        });
     }
     
     // Get the navigation bar height in pixels
