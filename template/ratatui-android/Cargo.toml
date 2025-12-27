@@ -1,0 +1,63 @@
+[package]
+name = "ratatui-android"
+version = "0.1.0"
+edition = "2024"
+authors = ["Matias Hiltunen"]
+description = "Android backend for Ratatui"
+license = "MIT"
+keywords = ["tui", "terminal", "android", "ratatui"]
+categories = ["command-line-interface", "gui"]
+readme = "README.md"
+
+[features]
+default = []
+
+# Enable Android native rendering via JNI (Canvas/TextPaint APIs)
+# Provides best emoji support on Android but requires JNI overhead
+android-native-backend = ["jni", "ndk-context"]
+
+# Enable swash backend for emoji rendering (fallback if cosmic-text fails)
+swash-backend = ["swash"]
+
+# Enable ab_glyph backend for text rendering (fallback if cosmic-text fails)  
+ab-glyph-backend = ["ab_glyph"]
+
+[dependencies]
+# Ratatui for TUI framework
+ratatui = { version = "0.30.0-alpha.5", default-features = false }
+
+# Text rendering with cosmic-text
+cosmic-text = { version = "0.12", default-features = false, features = ["std", "swash"] }
+
+# Caching
+lru = "0.13"
+lazy_static = "1.5"
+
+# Logging
+log = "0.4"
+
+# Unicode width detection
+unicode-width = "0.2"
+
+# Crossterm for event types (used by input module)
+crossterm = { version = "0.28", default-features = false, features = ["events"] }
+
+# Optional: Android native rendering dependencies
+jni = { version = "0.21", optional = true }
+ndk-context = { version = "0.1", optional = true }
+
+# Optional: Alternative rendering backends
+swash = { version = "0.2", optional = true }
+ab_glyph = { version = "0.2", optional = true }
+
+# Android-specific dependencies (only compiled for Android target)
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.5", features = ["native-activity"] }
+ndk = "0.8"
+ndk-sys = "0.5"
+android_logger = "0.13"
+
+[dev-dependencies]
+# For testing
+env_logger = "0.11"
+

@@ -1,0 +1,2 @@
+int string app_name 0x0
+int xml network_security_config 0x0
