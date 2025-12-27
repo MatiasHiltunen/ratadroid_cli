@@ -4,11 +4,13 @@
 //! manages Gradle-based builds, and provides a streamlined development workflow.
 
 use clap::{Parser, Subcommand};
+use colored::*;
 use include_dir::{include_dir, Dir};
+use regex::Regex;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use tokio::fs;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use hyper::{Body, Method, Request, Response, Server};
 use hyper::service::{make_service_fn, service_fn};
 use walkdir::WalkDir;
@@ -75,6 +77,9 @@ enum Commands {
         /// Build variant: debug or release.
         #[arg(long, default_value = "debug")]
         variant: String,
+        /// Stream logcat output after launching the app.
+        #[arg(long)]
+        log: bool,
     },
     /// Show crash logs from the last app run.
     Logs {
@@ -84,12 +89,6 @@ enum Commands {
         /// Number of lines to show.
         #[arg(long, default_value_t = 100)]
         lines: usize,
-    },
-    /// Build the current project into an Android binary using cargo-ndk (legacy).
-    BuildLegacy {
-        /// Target triple (e.g. aarch64-linux-android, armv7-linux-androideabi).
-        #[arg(long)]
-        target: Option<String>,
     },
     /// Serve a directory of APKs and other files over HTTP.
     Serve {
@@ -118,13 +117,126 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::New { name, path } => handle_new(name, path).await,
         Commands::Build { variant, target } => handle_gradle_build(variant, target).await,
         Commands::Install { variant } => handle_gradle_install(variant).await,
-        Commands::Run { variant } => handle_gradle_run(variant).await,
-        Commands::BuildLegacy { target } => handle_build(target).await,
+        Commands::Run { variant, log } => handle_gradle_run(variant, log).await,
         Commands::Serve { port, dir } => handle_serve(port, dir).await,
         Commands::Doctor { fix } => handle_doctor(fix).await,
         Commands::Logs { package, lines } => handle_logs(package, lines).await,
         Commands::Devices => handle_devices().await,
     }
+}
+
+/// Colored logging helpers for consistent, beautiful CLI output
+mod log {
+    use colored::*;
+    
+    pub fn info(msg: &str) {
+        println!("{}", msg.bright_blue());
+    }
+    
+    pub fn success(msg: &str) {
+        println!("{}", msg.bright_green());
+    }
+    
+    pub fn warning(msg: &str) {
+        println!("{}", msg.bright_yellow());
+    }
+    
+    pub fn error(msg: &str) {
+        eprintln!("{}", msg.bright_red());
+    }
+    
+    pub fn step(msg: &str) {
+        println!("{} {}", "→".bright_cyan(), msg.bright_white());
+    }
+    
+    pub fn header(msg: &str) {
+        println!("{}", msg.bright_cyan().bold());
+    }
+}
+
+/// Streams Android logcat output with colored formatting
+async fn stream_logcat_output(adb: &str, device_id: Option<&str>, package_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use tokio::process::Command as TokioCommand;
+    
+    let mut cmd = TokioCommand::new(adb);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::null());
+    
+    if let Some(id) = device_id {
+        cmd.args(["-s", id]);
+    }
+    
+    // Filter logcat to show relevant tags (package name and AndroidRuntime errors)
+    // Format: -v time shows timestamps
+    cmd.args(["logcat", "-v", "time"]);
+    
+    let mut child = cmd.spawn()?;
+    
+    let stdout = child.stdout.take()
+        .ok_or("Failed to capture stdout")?;
+    
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    
+    // Regex to parse logcat lines: "MM-DD HH:MM:SS.mmm  PID  TID LEVEL TAG: Message"
+    let log_regex = Regex::new(r"(\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\s+(\d+)\s+(\d+)\s+([VDIWEF])\s+([^:]+):\s*(.*)")?;
+    
+    log::header("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    log::header("📱 ANDROID LOGCAT (Press Ctrl+C to stop)");
+    log::header("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) => break, // EOF
+            Ok(_) => {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                
+                // Try to parse and colorize the log line
+                if let Some(caps) = log_regex.captures(line) {
+                    let timestamp = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+                    let level = caps.get(4).map(|m| m.as_str()).unwrap_or("");
+                    let tag = caps.get(5).map(|m| m.as_str()).unwrap_or("");
+                    let message = caps.get(6).map(|m| m.as_str()).unwrap_or("");
+                    
+                    let level_color = match level {
+                        "V" => "VERBOSE".bright_black(),
+                        "D" => "DEBUG".bright_blue(),
+                        "I" => "INFO".bright_green(),
+                        "W" => "WARN".bright_yellow(),
+                        "E" => "ERROR".bright_red(),
+                        "F" => "FATAL".bright_red().bold(),
+                        _ => level.bright_white(),
+                    };
+                    
+                    let tag_color = if tag.contains("ratadroid") || tag.contains("NativeActivity") || tag.contains(package_name) {
+                        tag.bright_cyan().bold()
+                    } else {
+                        tag.bright_white()
+                    };
+                    
+                    println!("{} {} {}: {}", 
+                        timestamp.bright_black(),
+                        level_color,
+                        tag_color,
+                        message.bright_white()
+                    );
+                } else {
+                    // Fallback: just print the line
+                    println!("{}", line.bright_white());
+                }
+            }
+            Err(e) => {
+                log::error(&format!("Error reading logcat: {}", e));
+                break;
+            }
+        }
+    }
+    
+    Ok(())
 }
 
 /// Checks if Gradle is available and returns its path or wrapper path.
@@ -1062,9 +1174,9 @@ async fn handle_gradle_install(variant: String) -> Result<(), Box<dyn std::error
 }
 
 /// Runs the app on a connected device or emulator.
-async fn handle_gradle_run(variant: String) -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_gradle_run(variant: String, stream_logcat: bool) -> Result<(), Box<dyn std::error::Error>> {
     let project_dir = env::current_dir()?;
-    println!("Running app (variant: {})...", variant);
+    log::step(&format!("Running app (variant: {})...", variant));
     
     // First build and install
     handle_gradle_build(variant.clone(), None).await?;
@@ -1081,28 +1193,50 @@ async fn handle_gradle_run(variant: String) -> Result<(), Box<dyn std::error::Er
     let package_name = format!("com.ratadroid.{}", 
         project_dir.file_name().and_then(|n| n.to_str()).unwrap_or("app"));
     
-    println!("Launching app...");
+    log::step("Launching app...");
     let mut launch_cmd = Command::new(&adb);
     
     // If we have a device ID and multiple devices are connected, specify which device to use
-    if let Some(device_info) = &device_id {
+    let device_id_str = if let Some(device_info) = &device_id {
         launch_cmd.args(["-s", &device_info.id]);
-        println!("  Targeting device: {} ({})", device_info.model, device_info.id);
-    }
+        log::info(&format!("  Targeting device: {} ({})", device_info.model, device_info.id));
+        Some(device_info.id.clone())
+    } else {
+        None
+    };
     
     launch_cmd.args(["shell", "am", "start", "-n", &format!("{}/.NativeActivity", package_name)]);
     
     let status = launch_cmd.status();
     
     match status {
-        Ok(s) if s.success() => println!("✓ App launched!"),
+        Ok(s) if s.success() => {
+            log::success("✓ App launched!");
+            
+            // Stream logcat output only if --log flag is set
+            if stream_logcat {
+                // Clear logcat buffer and start streaming
+                let _ = Command::new(&adb)
+                    .args(device_id_str.as_ref().map(|id| vec!["-s", id]).unwrap_or_default())
+                    .args(["logcat", "-c"])
+                    .status();
+                
+                // Stream logcat output
+                log::info("\nStarting logcat stream...");
+                if let Err(e) = stream_logcat_output(&adb, device_id_str.as_deref(), &package_name).await {
+                    log::warning(&format!("Logcat stream ended: {}", e));
+                }
+            } else {
+                log::info("\n💡 Tip: Use 'ratadroid run --log' to stream logcat output");
+            }
+        },
         Ok(_) => {
             let cmd_str = if let Some(device_info) = &device_id {
                 format!("{} -s {} shell am start -n {}/.NativeActivity", adb, device_info.id, package_name)
             } else {
                 format!("{} shell am start -n {}/.NativeActivity", adb, package_name)
             };
-            println!("⚠️  Launch command failed. Try manually: {}", cmd_str);
+            log::warning(&format!("⚠️  Launch command failed. Try manually: {}", cmd_str));
         },
         Err(e) => return Err(format!("Failed to launch app: {}", e).into()),
     }
@@ -1210,27 +1344,6 @@ fn capitalize_first(s: &str) -> String {
     }
 }
 
-/// Runs cargo‑ndk to build the current crate for the given target architecture (legacy).
-async fn handle_build(target: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
-    let target = target.unwrap_or_else(|| "aarch64-linux-android".to_string());
-    println!("Building for target {} (legacy cargo-ndk method)…", target);
-    let status = Command::new("cargo")
-        .args(["ndk", "--target", &target, "-o", "dist", "build", "--release"])
-        .status();
-    match status {
-        Ok(exit) if exit.success() => {
-            println!("\nBuild succeeded.  The output should be in the `dist` directory.");
-        }
-        Ok(exit) => {
-            println!("\nBuild failed with status {}.  Ensure cargo‑ndk is installed.", exit);
-        }
-        Err(err) => {
-            println!("\nError launching cargo‑ndk: {}.  Is cargo‑ndk installed?", err);
-        }
-    }
-    Ok(())
-}
-
 /// Checks the developer's environment and prints a report.
 async fn handle_doctor(fix: bool) -> Result<(), Box<dyn std::error::Error>> {
     println!("\nRatadroid doctor\n==============\n");
@@ -1336,29 +1449,94 @@ async fn handle_doctor(fix: bool) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Serves files from the given directory on the specified port using Hyper.
+/// Auto-detects APK output directory if default "dist" doesn't exist.
 async fn handle_serve(port: u16, dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    let dir = fs::canonicalize(&dir).await?;
-    println!("Serving {} on http://0.0.0.0:{}/", dir.display(), port);
+    let project_dir = env::current_dir()?;
+    let serve_dir: PathBuf;
+    
+    // If default "dist" directory doesn't exist, try to auto-detect APK output directory
+    if dir.to_string_lossy() == "dist" && !dir.exists() {
+        let apk_output_dir = project_dir.join("app").join("build").join("outputs").join("apk");
+        
+        // Check if we're in a ratadroid project with APK outputs
+        if apk_output_dir.exists() {
+            serve_dir = apk_output_dir;
+            log::info(&format!("Auto-detected APK output directory: {}", serve_dir.display()));
+        } else {
+            // Create dist directory if it doesn't exist
+            fs::create_dir_all(&dir).await?;
+            serve_dir = dir;
+            log::warning("Directory 'dist' doesn't exist. Created empty directory. Build APKs first or specify --dir");
+        }
+    } else {
+        // Use the specified directory, create if it doesn't exist
+        if !dir.exists() {
+            fs::create_dir_all(&dir).await?;
+            log::info(&format!("Created directory: {}", dir.display()));
+        }
+        serve_dir = fs::canonicalize(&dir).await?;
+    }
+    
+    // Check for APKs in the serve directory and subdirectories
+    let mut found_apks = Vec::new();
+    if serve_dir.exists() {
+        for entry in WalkDir::new(&serve_dir).max_depth(3) {
+            if let Ok(entry) = entry {
+                if let Some(ext) = entry.path().extension() {
+                    if ext == "apk" {
+                        if let Ok(rel_path) = entry.path().strip_prefix(&serve_dir) {
+                            found_apks.push(rel_path.to_string_lossy().to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    if !found_apks.is_empty() {
+        log::success(&format!("Found {} APK(s):", found_apks.len()));
+        for apk in &found_apks {
+            log::info(&format!("  - {}", apk));
+        }
+    } else {
+        log::warning("No APK files found in the serve directory.");
+    }
+    
+    log::header(&format!("Serving {} on http://0.0.0.0:{}/", serve_dir.display(), port));
     let make_service = make_service_fn(move |_| {
-        let dir = dir.clone();
+        let serve_dir = serve_dir.clone();
         async move {
             Ok::<_, hyper::Error>(service_fn(move |req: Request<Body>| {
-                let dir = dir.clone();
+                let serve_dir = serve_dir.clone();
                 async move {
                     match (req.method(), req.uri().path()) {
                         (&Method::GET, "/") => {
-                            let mut listing = String::from("<html><body><h1>Files</h1><ul>");
-                            for entry in WalkDir::new(&dir).min_depth(1).max_depth(1) {
+                            let mut listing = String::from("<html><head><title>Ratadroid APK Server</title></head><body><h1>📱 Available APKs</h1><ul>");
+                            // Walk deeper to find APKs in subdirectories (debug/release)
+                            for entry in WalkDir::new(&serve_dir).min_depth(1).max_depth(3) {
                                 let entry = match entry {
                                     Ok(e) => e,
                                     Err(_) => continue,
                                 };
                                 if entry.path().is_file() {
-                                    let name = entry.file_name().to_string_lossy();
-                                    listing.push_str(&format!("<li><a href=\"/{0}\">{0}</a></li>", name));
+                                    if let Some(ext) = entry.path().extension() {
+                                        if ext == "apk" {
+                                            // Get relative path from serve_dir
+                                            if let Ok(rel_path) = entry.path().strip_prefix(&serve_dir) {
+                                                let rel_str = rel_path.to_string_lossy().replace('\\', "/");
+                                                let name = entry.file_name().to_string_lossy();
+                                                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                                                let size_mb = size as f64 / 1_048_576.0;
+                                                listing.push_str(&format!(
+                                                    "<li><a href=\"/{}\"><strong>{}</strong></a> ({:.2} MB)</li>", 
+                                                    rel_str, name, size_mb
+                                                ));
+                                            }
+                                        }
+                                    }
                                 }
                             }
-                            listing.push_str("</ul></body></html>");
+                            listing.push_str("</ul><hr><p><small>Ratadroid APK Server - Share these links to download APKs</small></p></body></html>");
                             Ok::<_, hyper::Error>(Response::new(Body::from(listing)))
                         }
                         (&Method::GET, path) => {
@@ -1369,11 +1547,11 @@ async fn handle_serve(port: u16, dir: PathBuf) -> Result<(), Box<dyn std::error:
                                     .body(Body::from("Forbidden: Invalid path"))
                                     .unwrap());
                             }
-                            let mut file_path = dir.clone();
+                            let mut file_path = serve_dir.clone();
                             file_path.push(trimmed);
                             match fs::canonicalize(&file_path).await {
                                 Ok(canonical) => {
-                                    if !canonical.starts_with(&dir) {
+                                    if !canonical.starts_with(&serve_dir) {
                                         return Ok(Response::builder()
                                             .status(403)
                                             .body(Body::from("Forbidden: Path traversal detected"))
