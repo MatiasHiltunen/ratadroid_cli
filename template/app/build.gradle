@@ -3,11 +3,11 @@ plugins {
 }
 
 android {
-    namespace 'com.ratadroid.ratadroid_template'
+    namespace 'com.ratadroid.template'
     compileSdk 36
 
     defaultConfig {
-        applicationId "com.ratadroid.ratadroid_template"
+        applicationId "com.ratadroid.template"
         minSdk 29
         targetSdk 36
         versionCode 1

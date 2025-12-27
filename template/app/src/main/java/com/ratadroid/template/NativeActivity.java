@@ -1,4 +1,4 @@
-package com.ratadroid.ratadroid_template;
+package com.ratadroid.template;
 
 import android.os.Bundle;
 import android.view.View;

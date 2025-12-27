@@ -32,6 +32,9 @@ local.properties  # Contains local SDK paths - should not be committed
 target/
 Cargo.lock
 
+# Native libraries (built from Rust, copied to jniLibs)
+app/src/main/jniLibs/
+
 # OS
 .DS_Store
 Thumbs.db
