@@ -1,6 +1,0 @@
-[
-    {
-        "merged": "com.ratadroid.ratadroid_template.app-debug-22:/xml_network_security_config.xml.flat",
-        "source": "com.ratadroid.ratadroid_template.app-main-24:/xml/network_security_config.xml"
-    }
-]
