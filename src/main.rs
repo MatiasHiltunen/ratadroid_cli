@@ -4,6 +4,7 @@
 //! manages Gradle-based builds, and provides a streamlined development workflow.
 
 use clap::{Parser, Subcommand};
+use include_dir::{include_dir, Dir};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tokio::fs;
@@ -13,6 +14,25 @@ use hyper::service::{make_service_fn, service_fn};
 use walkdir::WalkDir;
 use std::env;
 use std::fs as stdfs;
+
+/// Embedded template directory - bundled at compile time
+/// This includes the complete, runnable template project
+static TEMPLATE_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/template");
+
+/// Patterns for files/directories to exclude when extracting template
+const TEMPLATE_EXCLUDE_PATTERNS: &[&str] = &[
+    // Build artifacts
+    "target",
+    "build",
+    ".gradle",
+    // Generated/local files  
+    "local.properties",
+    "Cargo.lock",
+    // Native libraries (built from Rust)
+    "jniLibs",
+    // IDE files
+    ".idea",
+];
 
 /// Ratadroid CLI top‑level arguments.
 #[derive(Parser)]
@@ -126,49 +146,6 @@ fn find_gradle(project_dir: Option<&Path>) -> Option<String> {
         Ok(output) if output.status.success() => Some("gradle".to_string()),
         _ => None,
     }
-}
-
-/// Ensures Gradle is available, installing wrapper if needed.
-async fn ensure_gradle(project_dir: &Path) -> Result<String, Box<dyn std::error::Error>> {
-    // Check if wrapper exists
-    let wrapper = if cfg!(windows) {
-        project_dir.join("gradlew.bat")
-    } else {
-        project_dir.join("gradlew")
-    };
-    
-    if wrapper.exists() {
-        return Ok(wrapper.to_string_lossy().to_string());
-    }
-    
-    // Check for global Gradle
-    if let Some(gradle) = find_gradle(None) {
-        // Initialize Gradle wrapper
-        println!("Initializing Gradle wrapper...");
-        let status = Command::new(&gradle)
-            .current_dir(project_dir)
-            .args(["wrapper", "--gradle-version", "9.2.1"])
-            .status()?;
-        
-        if status.success() {
-            let wrapper_path = if cfg!(windows) {
-                project_dir.join("gradlew.bat")
-            } else {
-                project_dir.join("gradlew")
-            };
-            // Make wrapper executable on Unix
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = stdfs::metadata(&wrapper_path)?.permissions();
-                perms.set_mode(0o755);
-                stdfs::set_permissions(&wrapper_path, perms)?;
-            }
-            return Ok(wrapper_path.to_string_lossy().to_string());
-        }
-    }
-    
-    Err("Gradle not found. Please install Gradle or run 'ratadroid init' first.".into())
 }
 
 /// Performs best‑effort setup of the Android build environment.
@@ -735,7 +712,134 @@ async fn handle_devices() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Checks if a path component should be excluded when extracting template
+fn should_exclude_template_path(path: &Path) -> bool {
+    for component in path.components() {
+        let name = component.as_os_str().to_string_lossy();
+        for pattern in TEMPLATE_EXCLUDE_PATTERNS {
+            if name == *pattern {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Applies placeholder replacement to template content
+/// Replaces template placeholders with project-specific values
+fn apply_template_replacements(content: &str, project_name: &str) -> String {
+    content
+        // Package name: template -> project_name
+        .replace("com.ratadroid.template", &format!("com.ratadroid.{}", project_name))
+        // Project name in settings.gradle
+        .replace("rootProject.name = 'ratadroid_template'", &format!("rootProject.name = '{}'", project_name))
+        .replace("rootProject.name = \"ratadroid_template\"", &format!("rootProject.name = \"{}\"", project_name))
+        // General template references
+        .replace("ratadroid_template", project_name)
+}
+
+/// Files that need template placeholder replacement
+fn needs_template_replacement(path: &Path) -> bool {
+    let replaceable_extensions = ["gradle", "xml", "java", "kt", "rs", "toml", "md", "properties"];
+    let replaceable_names = ["gradlew", "gradlew.bat"];
+    
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        if replaceable_names.contains(&name) {
+            return false; // Scripts don't need replacement
+        }
+    }
+    
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        return replaceable_extensions.contains(&ext);
+    }
+    false
+}
+
+/// Extracts the bundled template to a target directory with project-specific modifications
+async fn extract_template(
+    project_dir: &Path,
+    project_name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use include_dir::DirEntry;
+    
+    // Helper to recursively extract files
+    fn collect_entries<'a>(dir: &'a Dir<'a>, entries: &mut Vec<(&'a Path, &'a [u8])>) {
+        for entry in dir.entries() {
+            match entry {
+                DirEntry::Dir(subdir) => {
+                    collect_entries(subdir, entries);
+                }
+                DirEntry::File(file) => {
+                    entries.push((file.path(), file.contents()));
+                }
+            }
+        }
+    }
+    
+    let mut entries = Vec::new();
+    collect_entries(&TEMPLATE_DIR, &mut entries);
+    
+    for (rel_path, contents) in entries {
+        // Skip excluded paths
+        if should_exclude_template_path(rel_path) {
+            continue;
+        }
+        
+        // Transform the path for the new project
+        let mut target_path = project_dir.to_path_buf();
+        
+        // Handle Java package directory renaming
+        // template/app/src/main/java/com/ratadroid/template/... -> .../com/ratadroid/{name}/...
+        let path_str = rel_path.to_string_lossy();
+        if path_str.contains("com/ratadroid/template") {
+            let new_path_str = path_str.replace(
+                "com/ratadroid/template",
+                &format!("com/ratadroid/{}", project_name),
+            );
+            target_path.push(&new_path_str);
+        } else {
+            target_path.push(rel_path);
+        }
+        
+        // Create parent directories
+        if let Some(parent) = target_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        
+        // Apply template replacements for text files
+        if needs_template_replacement(rel_path) {
+            if let Ok(text) = std::str::from_utf8(contents) {
+                let modified = apply_template_replacements(text, project_name);
+                fs::write(&target_path, modified).await?;
+            } else {
+                // Binary file, write as-is
+                fs::write(&target_path, contents).await?;
+            }
+        } else {
+            // Binary file or no replacement needed
+            fs::write(&target_path, contents).await?;
+        }
+    }
+    
+    // Make gradlew executable on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let gradlew = project_dir.join("gradlew");
+        if gradlew.exists() {
+            let mut perms = stdfs::metadata(&gradlew)?.permissions();
+            perms.set_mode(0o755);
+            stdfs::set_permissions(&gradlew, perms)?;
+        }
+    }
+    
+    Ok(())
+}
+
 /// Scaffolds a new Android NativeActivity project with Rust integration.
+/// 
+/// Uses the bundled template directory which is a complete, runnable project.
+/// The template is extracted and customized with the project name.
 async fn handle_new(name: String, path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     let project_dir = path.unwrap_or_else(|| PathBuf::from(&name));
     
@@ -757,37 +861,12 @@ async fn handle_new(name: String, path: Option<PathBuf>) -> Result<(), Box<dyn s
         println!("Detected Android NDK at: {}", ndk);
     }
     
-    // Create directory structure
+    // Create project directory
     fs::create_dir_all(&project_dir).await?;
     
-    let app_dir = project_dir.join("app");
-    let src_main_dir = app_dir.join("src").join("main");
-    let java_dir = src_main_dir.join("java").join("com").join("ratadroid").join(&name);
-    let res_dir = src_main_dir.join("res");
-    let rust_dir = project_dir.join("rust");
-    
-    fs::create_dir_all(&java_dir).await?;
-    fs::create_dir_all(&res_dir.join("layout")).await?;
-    fs::create_dir_all(&res_dir.join("values")).await?;
-    fs::create_dir_all(&rust_dir.join("src")).await?;
-    
-    // Helper function to replace placeholders in templates
-    let replace_template = |template: &str| -> String {
-        template.replace("{name}", &name)
-    };
-    
-    // Create root build.gradle FIRST (before initializing wrapper)
-    let root_build_gradle = include_str!("../templates/root_build.gradle");
-    fs::write(project_dir.join("build.gradle"), root_build_gradle).await?;
-    
-    // Create settings.gradle
-    let settings_gradle_template = include_str!("../templates/settings.gradle");
-    let settings_gradle = replace_template(settings_gradle_template);
-    fs::write(project_dir.join("settings.gradle"), settings_gradle).await?;
-    
-    // Create gradle.properties
-    let gradle_properties = include_str!("../templates/gradle.properties");
-    fs::write(project_dir.join("gradle.properties"), gradle_properties).await?;
+    // Extract the bundled template
+    println!("Extracting template...");
+    extract_template(&project_dir, &name).await?;
     
     // Create local.properties with SDK location if found
     if let Some(sdk) = &sdk_path {
@@ -800,78 +879,11 @@ async fn handle_new(name: String, path: Option<PathBuf>) -> Result<(), Box<dyn s
         println!("⚠️  Android SDK not detected. You may need to create local.properties manually.");
     }
     
-    // Now ensure Gradle wrapper is initialized (after Gradle files exist)
-    let gradle = ensure_gradle(&project_dir).await?;
-    println!("Using Gradle: {}", gradle);
-    
-    // Create app/build.gradle
-    let app_build_gradle = replace_template(include_str!("../templates/app_build.gradle"));
-    fs::write(app_dir.join("build.gradle"), app_build_gradle).await?;
-    
-    // Create AndroidManifest.xml
-    let manifest = replace_template(include_str!("../templates/AndroidManifest.xml"));
-    fs::write(src_main_dir.join("AndroidManifest.xml"), manifest).await?;
-    
-    // Create NativeActivity Java class
-    let native_activity = replace_template(include_str!("../templates/NativeActivity.java"));
-    fs::write(java_dir.join("NativeActivity.java"), native_activity).await?;
-    
-    // Create strings.xml
-    let strings_xml = replace_template(include_str!("../templates/strings.xml"));
-    fs::write(res_dir.join("values").join("strings.xml"), strings_xml).await?;
-    
-    // Create Rust library
-    let rust_cargo_toml = replace_template(include_str!("../templates/rust_Cargo.toml"));
-    fs::write(rust_dir.join("Cargo.toml"), rust_cargo_toml).await?;
-    
-    // Create Rust lib.rs with ratatui example
-    let rust_lib_rs = replace_template(include_str!("../templates/rust_lib.rs"));
-    fs::write(rust_dir.join("src").join("lib.rs"), rust_lib_rs).await?;
-    
-    // Create Rust backend.rs (custom Ratatui backend)
-    let rust_backend_rs = include_str!("../templates/rust_backend.rs");
-    fs::write(rust_dir.join("src").join("backend.rs"), rust_backend_rs).await?;
-    
-    // Create Rust rasterizer.rs (software rasterizer)
-    let rust_rasterizer_rs = include_str!("../templates/rust_rasterizer.rs");
-    fs::write(rust_dir.join("src").join("rasterizer.rs"), rust_rasterizer_rs).await?;
-    
-    // Create Rust input.rs (Android input adapter)
-    let rust_input_rs = include_str!("../templates/rust_input.rs");
-    fs::write(rust_dir.join("src").join("input.rs"), rust_input_rs).await?;
-    
-    // Create Rust build.rs
-    let rust_build_rs = include_str!("../templates/rust_build.rs");
-    fs::write(rust_dir.join("build.rs"), rust_build_rs).await?;
-    
-    // Create fonts directory and copy font file if it exists
-    let fonts_dir = rust_dir.join("fonts");
-    fs::create_dir_all(&fonts_dir).await?;
-    let template_font = Path::new("templates/fonts/Hack-Regular.ttf");
-    if template_font.exists() {
-        fs::copy(template_font, fonts_dir.join("Hack-Regular.ttf")).await?;
-        println!("Copied font file to project");
-    } else {
-        // Create a README in fonts directory explaining how to add a font
-        let font_readme = r#"# Fonts Directory
-
-Place a monospace TrueType font (.ttf) file here named `Hack-Regular.ttf`.
-
-You can download Hack font from: https://github.com/source-foundry/Hack/releases
-
-Or use any other monospace font - just rename it to `Hack-Regular.ttf` or update the 
-`include_bytes!` path in `src/lib.rs`.
-"#;
-        fs::write(fonts_dir.join("README.md"), font_readme).await?;
+    // Verify Gradle wrapper is available
+    let gradle = find_gradle(Some(&project_dir));
+    if let Some(g) = &gradle {
+        println!("Using Gradle: {}", g);
     }
-    
-    // Create .gitignore
-    let gitignore = include_str!("../templates/gitignore");
-    fs::write(project_dir.join(".gitignore"), gitignore).await?;
-    
-    // Create README.md
-    let readme = replace_template(include_str!("../templates/README.md"));
-    fs::write(project_dir.join("README.md"), readme).await?;
     
     println!("\n✓ Project scaffolded successfully!");
     
@@ -896,7 +908,7 @@ Or use any other monospace font - just rename it to `Hack-Regular.ttf` or update
         println!("  3. ratadroid doctor --fix  # Verify environment");
     } else {
         println!("  2. ratadroid build        # Build the APK");
-        println!("  3. ratadroid install       # Install on device/emulator");
+        println!("  3. ratadroid run          # Build, install, and run on device");
     }
     
     Ok(())
