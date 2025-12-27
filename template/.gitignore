@@ -1,0 +1,38 @@
+# Built application files
+*.apk
+*.ap_
+*.aab
+
+# Files for the ART/Dalvik VM
+*.dex
+
+# Java class files
+*.class
+
+# Generated files
+bin/
+gen/
+out/
+release/
+
+# Gradle files
+.gradle/
+build/
+local.properties  # Contains local SDK paths - should not be committed
+*.iml
+.idea/
+
+# Android Studio
+*.iml
+.idea/
+*.ipr
+*.iws
+
+# Rust
+target/
+Cargo.lock
+
+# OS
+.DS_Store
+Thumbs.db
+
