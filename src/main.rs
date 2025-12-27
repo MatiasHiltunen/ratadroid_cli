@@ -1511,7 +1511,7 @@ async fn handle_serve(port: u16, dir: PathBuf) -> Result<(), Box<dyn std::error:
                 async move {
                     match (req.method(), req.uri().path()) {
                         (&Method::GET, "/") => {
-                            let mut listing = String::from("<html><head><title>Ratadroid APK Server</title></head><body><h1>📱 Available APKs</h1><ul>");
+                            let mut listing = String::from("<html><head><title>Ratadroid APK Server</title></head><body><h1>Available APKs</h1><ul>");
                             // Walk deeper to find APKs in subdirectories (debug/release)
                             for entry in WalkDir::new(&serve_dir).min_depth(1).max_depth(3) {
                                 let entry = match entry {
