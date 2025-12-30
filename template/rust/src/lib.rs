@@ -36,6 +36,9 @@ pub use ratatui_android::{
 pub use ratatui;
 
 #[cfg(target_os = "android")]
+pub mod jni_utils;
+
+#[cfg(target_os = "android")]
 mod runtime;
 
 #[cfg(target_os = "android")]

@@ -151,6 +151,22 @@ pub fn load_font_data(data: Vec<u8>) {
     }
 }
 
+/// Check if a character is an emoji or special symbol (like Java's isEmojiOrSpecial).
+/// These should use a different font family (SansSerif/Default) instead of Monospace.
+pub fn is_emoji_or_special(c: char) -> bool {
+    let code = c as u32;
+    matches!(
+        code,
+        0x1F300..=0x1F9FF | // Misc Symbols, Emoticons (includes emojis)
+        0x1FA00..=0x1FAFF | // Extended symbols
+        0x2600..=0x26FF |   // Misc symbols
+        0x2700..=0x27BF |   // Dingbats
+        0x1F600..=0x1F64F | // Emoticons
+        0x1F900..=0x1F9FF | // Supplemental Symbols and Pictographs
+        0x1F1E0..=0x1F1FF   // Flags
+    )
+}
+
 /// Check if a character is considered "wide" (takes 2 terminal cells).
 pub fn is_wide_char(c: char) -> bool {
     let code = c as u32;
@@ -161,13 +177,8 @@ pub fn is_wide_char(c: char) -> bool {
         0xAC00..=0xD7A3 |   // Hangul Syllables
         0xF900..=0xFAFF |   // CJK Compatibility Ideographs
         0xFE10..=0xFE1F |   // Vertical forms
-        0xFF00..=0xFFEF |   // Fullwidth forms
-        0x1F300..=0x1F9FF | // Misc Symbols, Emoticons (includes emojis)
-        0x1FA00..=0x1FAFF | // Extended symbols
-        0x2600..=0x26FF |   // Misc symbols
-        0x2700..=0x27BF |   // Dingbats
-        0x1F1E0..=0x1F1FF   // Flags
-    )
+        0xFF00..=0xFFEF     // Fullwidth forms
+    ) || is_emoji_or_special(c) // Emojis are also wide
 }
 
 /// Render a single character using cosmic-text.
@@ -251,8 +262,15 @@ fn render_char_cosmic(c: char, size: f32, color: [u8; 4]) -> Option<CachedChar> 
     let mut buffer = Buffer::new(&mut font_system, metrics);
     buffer.set_size(&mut font_system, Some(cell_width as f32 * 2.0), Some(line_height));
 
-    // Set text with monospace font family preference
-    let attrs = Attrs::new().family(Family::Monospace);
+    // Use different font family for emojis vs regular text (like Java implementation)
+    // Java used Typeface.DEFAULT for emojis and Typeface.MONOSPACE for regular text
+    let attrs = if is_emoji_or_special(c) {
+        // Use SansSerif/Default for emojis and special symbols for better rendering
+        Attrs::new().family(Family::SansSerif)
+    } else {
+        // Use Monospace for regular text to maintain terminal grid alignment
+        Attrs::new().family(Family::Monospace)
+    };
     buffer.set_text(&mut font_system, &c.to_string(), attrs, Shaping::Advanced);
 
     // Shape the text to get layout
@@ -582,7 +600,34 @@ impl Rasterizer {
         window_width: usize,
         window_height: usize,
     ) {
-        // Try cosmic-text rendering first
+        // For emojis: Try Android native rendering first (best quality)
+        #[cfg(all(target_os = "android", feature = "android-native-render"))]
+        {
+            use crate::android_render::render_char_android;
+            if is_emoji_or_special(c) {
+                if let Some((width, height, _is_wide, rgba_data)) = render_char_android(c, self.font_size, color) {
+                    if width > 0 && height > 0 && !rgba_data.is_empty() {
+                        let cell_width_multiplier = if is_wide_char(c) { 2.0 } else { 1.0 };
+                        self.render_bitmap(
+                            width,
+                            height,
+                            &rgba_data,
+                            px,
+                            py,
+                            dest,
+                            stride,
+                            window_width,
+                            window_height,
+                            cell_width_multiplier,
+                        );
+                        return;
+                    }
+                }
+                // Android rendering failed, fall through to cosmic-text fallback
+            }
+        }
+
+        // Try cosmic-text rendering (for regular characters, or as fallback for emojis)
         if let Some((width, height, _is_wide, rgba_data)) = render_char_cosmic(c, self.font_size, color) {
             if width > 0 && height > 0 && !rgba_data.is_empty() {
                 let cell_width_multiplier = if is_wide_char(c) { 2.0 } else { 1.0 };
@@ -602,32 +647,7 @@ impl Rasterizer {
             }
         }
 
-        // Android native rendering fallback would go here (feature-gated)
-        #[cfg(all(target_os = "android", feature = "android-native-backend"))]
-        {
-            if let Some((width, height, _is_wide, rgba_data)) =
-                crate::android_render::render_char_android(c, self.font_size, color)
-            {
-                if width > 0 && height > 0 && !rgba_data.is_empty() {
-                    let cell_width_multiplier = if is_wide_char(c) { 2.0 } else { 1.0 };
-                    self.render_bitmap(
-                        width,
-                        height,
-                        &rgba_data,
-                        px,
-                        py,
-                        dest,
-                        stride,
-                        window_width,
-                        window_height,
-                        cell_width_multiplier,
-                    );
-                    return;
-                }
-            }
-        }
-
-        // Fallback: draw a simple block
+        // Final fallback: draw a simple block
         self.draw_fallback_block(px, py, color, dest, stride, window_width, window_height);
     }
 

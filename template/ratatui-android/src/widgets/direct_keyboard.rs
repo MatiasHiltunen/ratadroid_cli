@@ -134,7 +134,8 @@ impl DirectKeyboard {
     ) {
         let button_height = button_height as usize;
         let total_units: u32 = self.row1.iter().map(|b| b.width_units).sum();
-        let button_width = (window_width / total_units as usize).min(100);
+        // Increased max button width from 100 to 150 for better touch targets
+        let button_width = (window_width / total_units as usize).min(150);
         let keyboard_width = button_width * total_units as usize;
         let keyboard_x = (window_width.saturating_sub(keyboard_width)) / 2;
 
@@ -331,7 +332,8 @@ impl DirectKeyboard {
     ) -> Option<&'static str> {
         let button_height = button_height as usize;
         let total_units: u32 = self.row1.iter().map(|b| b.width_units).sum();
-        let button_width = (window_width / total_units as usize).min(100);
+        // Must match the render() button width calculation
+        let button_width = (window_width / total_units as usize).min(150);
         let keyboard_width = button_width * total_units as usize;
         let keyboard_x = (window_width.saturating_sub(keyboard_width)) / 2;
 

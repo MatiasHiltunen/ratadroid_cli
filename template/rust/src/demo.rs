@@ -19,12 +19,15 @@ enum DemoTab {
     Welcome,
     Counter,
     Colors,
+    Unicode,
     Input,
 }
 
+const TAB_COUNT: usize = 5;
+
 impl DemoTab {
     fn titles() -> Vec<&'static str> {
-        vec!["Welcome", "Counter", "Colors", "Input"]
+        vec!["Welcome", "Counter", "Colors", "Unicode", "Input"]
     }
 
     fn index(&self) -> usize {
@@ -32,7 +35,8 @@ impl DemoTab {
             DemoTab::Welcome => 0,
             DemoTab::Counter => 1,
             DemoTab::Colors => 2,
-            DemoTab::Input => 3,
+            DemoTab::Unicode => 3,
+            DemoTab::Input => 4,
         }
     }
 
@@ -41,17 +45,18 @@ impl DemoTab {
             0 => DemoTab::Welcome,
             1 => DemoTab::Counter,
             2 => DemoTab::Colors,
-            3 => DemoTab::Input,
+            3 => DemoTab::Unicode,
+            4 => DemoTab::Input,
             _ => DemoTab::Welcome,
         }
     }
 
     fn next(&self) -> Self {
-        Self::from_index((self.index() + 1) % 4)
+        Self::from_index((self.index() + 1) % TAB_COUNT)
     }
 
     fn prev(&self) -> Self {
-        Self::from_index((self.index() + 3) % 4)
+        Self::from_index((self.index() + TAB_COUNT - 1) % TAB_COUNT)
     }
 }
 
@@ -60,6 +65,11 @@ pub struct DemoApp {
     current_tab: DemoTab,
     counter: i32,
     color_index: usize,
+    unicode_scroll: usize,
+    /// For drag-to-scroll: last Y position during drag
+    drag_last_y: Option<u16>,
+    /// Maximum scroll position (calculated during render)
+    unicode_max_scroll: usize,
     input_log: Vec<String>,
     tick_count: u64,
 }
@@ -76,6 +86,9 @@ impl DemoApp {
             current_tab: DemoTab::Welcome,
             counter: 0,
             color_index: 0,
+            unicode_scroll: 0,
+            drag_last_y: None,
+            unicode_max_scroll: 0,
             input_log: vec![
                 "Tap or use keyboard to interact".to_string(),
             ],
@@ -232,6 +245,168 @@ impl DemoApp {
         frame.render_widget(color_list, chunks[1]);
     }
 
+    fn render_unicode(&mut self, frame: &mut ratatui::Frame, area: Rect) {
+        // Collection of Unicode categories to showcase
+        let unicode_sections: Vec<(&str, &str, Vec<&str>)> = vec![
+            // Category name, description, examples
+            ("🎭 Emojis - Faces", "Basic emoji rendering", vec![
+                "😀 😃 😄 😁 😆 😅 🤣 😂",
+                "🙂 🙃 😉 😊 😇 🥰 😍 🤩",
+                "😘 😗 😚 😋 😛 😜 🤪 😝",
+                "🤑 🤗 🤭 🤫 🤔 🤐 🤨 😐",
+            ]),
+            ("👋 Emojis - Gestures", "Hands and gestures", vec![
+                "👍 👎 👊 ✊ 🤛 🤜 🤝 👏",
+                "🙌 👐 🤲 🙏 ✋ 🖐️ 🖖 👋",
+                "🤙 💪 🦾 🖕 ✍️ 🤳 💅 🦵",
+            ]),
+            ("👨‍👩‍👧 ZWJ Sequences", "Zero Width Joiner emojis", vec![
+                "👨‍👩‍👧 👨‍👩‍👧‍👦 👨‍👩‍👦‍👦 👨‍👩‍👧‍👧",
+                "👩‍❤️‍👨 👨‍❤️‍👨 👩‍❤️‍👩 💏 💑",
+                "👨‍💻 👩‍💻 🧑‍💻 👨‍🎨 👩‍🎨 🧑‍🎨",
+            ]),
+            ("🏳️ Flags", "Country and pride flags", vec![
+                "🇫🇮 🇸🇪 🇳🇴 🇩🇰 🇮🇸 🇪🇪 🇱🇻 🇱🇹",
+                "🇺🇸 🇬🇧 🇩🇪 🇫🇷 🇪🇸 🇮🇹 🇯🇵 🇰🇷",
+                "🏳️‍🌈 🏳️‍⚧️ 🏴‍☠️ 🏁 🚩 🎌",
+            ]),
+            ("👍🏻 Skin Tones", "Fitzpatrick scale modifiers", vec![
+                "👍🏻 👍🏼 👍🏽 👍🏾 👍🏿",
+                "🧑🏻 🧑🏼 🧑🏽 🧑🏾 🧑🏿",
+                "👋🏻 👋🏼 👋🏽 👋🏾 👋🏿",
+            ]),
+            ("🌍 Nature & Weather", "Nature emojis", vec![
+                "🌍 🌎 🌏 🌐 🗺️ 🧭 🏔️ ⛰️",
+                "🌋 🗻 🏕️ 🏖️ 🏜️ 🏝️ 🌅 🌄",
+                "☀️ 🌤️ ⛅ 🌥️ ☁️ 🌦️ 🌧️ ⛈️",
+                "🌈 ❄️ 💧 💦 🌊 🔥 💥 ⭐",
+            ]),
+            ("🎉 Objects & Symbols", "Various symbols", vec![
+                "🎉 🎊 🎈 🎁 🎀 🎗️ 🏆 🥇",
+                "⚽ 🏀 🏈 ⚾ 🥎 🎾 🏐 🏉",
+                "💰 💵 💴 💶 💷 💎 💍 💄",
+                "⌚ 📱 💻 ⌨️ 🖥️ 🖨️ 🖱️ 📷",
+            ]),
+            ("📦 Box Drawing", "Terminal UI borders", vec![
+                "┌─────────────────────────────────┐",
+                "│ Single line borders             │",
+                "├─────────────────────────────────┤",
+                "│ ┬ ┴ ├ ┤ ┼ ─ │                   │",
+                "└─────────────────────────────────┘",
+                "╔═════════════════════════════════╗",
+                "║ Double line borders             ║",
+                "╠═════════════════════════════════╣",
+                "║ ╦ ╩ ╠ ╣ ╬ ═ ║                   ║",
+                "╚═════════════════════════════════╝",
+            ]),
+            ("🔤 Scandinavian/Finnish", "Nordic characters", vec![
+                "Finnish: ä ö å Ä Ö Å",
+                "Swedish: ä ö å Ä Ö Å",
+                "Norwegian/Danish: æ ø å Æ Ø Å",
+                "Icelandic: þ ð Þ Ð",
+                "Estonian: õ ä ö ü Õ Ä Ö Ü",
+            ]),
+            ("日本語 CJK Characters", "Chinese/Japanese/Korean", vec![
+                "日本語 中文 한국어",
+                "こんにちは (Hiragana)",
+                "カタカナ (Katakana)",
+                "漢字 (Kanji/Hanzi)",
+                "你好世界 (Chinese)",
+                "안녕하세요 (Korean)",
+            ]),
+            ("∑ Mathematical", "Math symbols", vec![
+                "∀ ∃ ∄ ∅ ∈ ∉ ∋ ∌",
+                "∩ ∪ ⊂ ⊃ ⊄ ⊅ ⊆ ⊇",
+                "∧ ∨ ¬ ⊕ ⊗ ⊖ ⊘ ⊙",
+                "∞ ∝ ≠ ≡ ≈ ≤ ≥ ≪ ≫",
+                "∑ ∏ √ ∛ ∜ ∫ ∬ ∭",
+                "α β γ δ ε ζ η θ ι κ λ μ",
+                "ν ξ π ρ σ τ υ φ χ ψ ω",
+            ]),
+            ("█ Block Elements", "Shading and blocks", vec![
+                "░▒▓█ (shading levels)",
+                "▀▄▌▐ (half blocks)",
+                "▁▂▃▄▅▆▇█ (vertical eighths)",
+                "▏▎▍▌▋▊▉█ (horizontal eighths)",
+                "■□▢▣▤▥▦▧▨▩ (squares)",
+                "● ○ ◐ ◑ ◒ ◓ ◔ ◕ (circles)",
+            ]),
+            ("↑ Arrows", "Directional arrows", vec![
+                "← ↑ → ↓ ↔ ↕ ↖ ↗ ↘ ↙",
+                "⇐ ⇑ ⇒ ⇓ ⇔ ⇕ ⇖ ⇗ ⇘ ⇙",
+                "➔ ➜ ➝ ➞ ➟ ➠ ➡ ➢ ➣ ➤",
+            ]),
+        ];
+
+        // Build lines with scroll
+        let mut all_lines: Vec<Line> = Vec::new();
+        
+        for (title, desc, examples) in &unicode_sections {
+            // Section header
+            all_lines.push(Line::from(Span::styled(
+                *title,
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            )));
+            all_lines.push(Line::from(Span::styled(
+                *desc,
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)
+            )));
+            
+            // Examples
+            for example in examples {
+                all_lines.push(Line::from(format!("  {}", example)));
+            }
+            
+            // Blank line between sections
+            all_lines.push(Line::from(""));
+        }
+
+        // Apply scroll offset
+        let visible_height = area.height.saturating_sub(4) as usize;
+        let max_scroll = all_lines.len().saturating_sub(visible_height);
+        
+        // Store max_scroll for drag handling
+        self.unicode_max_scroll = max_scroll;
+        
+        // Clamp current scroll to valid range
+        self.unicode_scroll = self.unicode_scroll.min(max_scroll);
+        let scroll = self.unicode_scroll;
+        
+        let visible_lines: Vec<Line> = all_lines
+            .into_iter()
+            .skip(scroll)
+            .take(visible_height)
+            .collect();
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(0),
+            ])
+            .split(area);
+
+        // Header with navigation info
+        let header = Paragraph::new(format!(
+            "↑/↓ or drag to scroll • {}/{} • cosmic-text",
+            scroll + 1,
+            max_scroll + 1
+        ))
+            .style(Style::default().fg(Color::Yellow))
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)));
+        frame.render_widget(header, chunks[0]);
+
+        // Unicode content
+        let content = Paragraph::new(visible_lines)
+            .style(Style::default().fg(Color::White))
+            .block(Block::default()
+                .title("Unicode Showcase")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)));
+        frame.render_widget(content, chunks[1]);
+    }
+
     fn render_input(&self, frame: &mut ratatui::Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -311,6 +486,7 @@ impl RatadroidApp for DemoApp {
             DemoTab::Welcome => self.render_welcome(frame, content_area, ctx),
             DemoTab::Counter => self.render_counter(frame, content_area),
             DemoTab::Colors => self.render_colors(frame, content_area),
+            DemoTab::Unicode => self.render_unicode(frame, content_area),
             DemoTab::Input => self.render_input(frame, content_area),
         }
     }
@@ -339,6 +515,9 @@ impl RatadroidApp for DemoApp {
                             DemoTab::Colors => {
                                 self.color_index = self.color_index.saturating_sub(1);
                             }
+                            DemoTab::Unicode => {
+                                self.unicode_scroll = self.unicode_scroll.saturating_sub(1);
+                            }
                             _ => {}
                         }
                         ctx.request_redraw();
@@ -349,6 +528,9 @@ impl RatadroidApp for DemoApp {
                             DemoTab::Counter => self.counter -= 1,
                             DemoTab::Colors => {
                                 self.color_index += 1;
+                            }
+                            DemoTab::Unicode => {
+                                self.unicode_scroll += 1;
                             }
                             _ => {}
                         }
@@ -379,6 +561,60 @@ impl RatadroidApp for DemoApp {
                 }
             }
             CrosstermEvent::Mouse(mouse) => {
+                // Handle drag scrolling for Unicode tab
+                if self.current_tab == DemoTab::Unicode {
+                    match mouse.kind {
+                        MouseEventKind::Down(_) => {
+                            // Start drag tracking
+                            self.drag_last_y = Some(mouse.row);
+                            return true;
+                        }
+                        MouseEventKind::Drag(_) => {
+                            if let Some(last_y) = self.drag_last_y {
+                                // Calculate scroll delta (inverted for natural scrolling)
+                                let delta = mouse.row as i32 - last_y as i32;
+                                if delta != 0 {
+                                    // Scroll by the delta amount (negative delta = scroll up)
+                                    if delta < 0 {
+                                        // Dragging up = scroll down (content moves up)
+                                        let scroll_amount = (-delta) as usize;
+                                        self.unicode_scroll = self.unicode_scroll
+                                            .saturating_add(scroll_amount)
+                                            .min(self.unicode_max_scroll);
+                                    } else {
+                                        // Dragging down = scroll up (content moves down)
+                                        let scroll_amount = delta as usize;
+                                        self.unicode_scroll = self.unicode_scroll
+                                            .saturating_sub(scroll_amount);
+                                    }
+                                    self.drag_last_y = Some(mouse.row);
+                                    ctx.request_redraw();
+                                }
+                            }
+                            return true;
+                        }
+                        MouseEventKind::Up(_) => {
+                            // End drag tracking
+                            self.drag_last_y = None;
+                            return true;
+                        }
+                        MouseEventKind::ScrollDown => {
+                            self.unicode_scroll = self.unicode_scroll
+                                .saturating_add(3)
+                                .min(self.unicode_max_scroll);
+                            ctx.request_redraw();
+                            return true;
+                        }
+                        MouseEventKind::ScrollUp => {
+                            self.unicode_scroll = self.unicode_scroll.saturating_sub(3);
+                            ctx.request_redraw();
+                            return true;
+                        }
+                        _ => {}
+                    }
+                }
+                
+                // Handle Input tab logging
                 if self.current_tab == DemoTab::Input {
                     let msg = match mouse.kind {
                         MouseEventKind::Down(btn) => format!("Mouse {:?} at ({}, {})", btn, mouse.column, mouse.row),

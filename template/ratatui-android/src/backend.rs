@@ -281,5 +281,158 @@ mod tests {
         let cells: Vec<_> = backend.cells().collect();
         assert_eq!(cells.len(), 100);
     }
+
+    // ==================== Emoji and Unicode Tests ====================
+
+    #[test]
+    fn test_backend_emoji_single_codepoint() {
+        // Simple emoji (single codepoint)
+        let mut backend = AndroidBackend::new(80, 24);
+        let mut cell = Cell::default();
+        cell.set_symbol("😀"); // U+1F600 Grinning Face
+
+        backend.draw([(0, 0, &cell)].into_iter()).unwrap();
+
+        let drawn_cell = backend.get_cell(0, 0).unwrap();
+        assert_eq!(drawn_cell.symbol(), "😀");
+    }
+
+    #[test]
+    fn test_backend_emoji_with_skin_tone() {
+        // Emoji with skin tone modifier (multi-codepoint)
+        let mut backend = AndroidBackend::new(80, 24);
+        let mut cell = Cell::default();
+        cell.set_symbol("👍🏻"); // Thumbs up + light skin tone
+
+        backend.draw([(0, 0, &cell)].into_iter()).unwrap();
+
+        let drawn_cell = backend.get_cell(0, 0).unwrap();
+        assert_eq!(drawn_cell.symbol(), "👍🏻");
+    }
+
+    #[test]
+    fn test_backend_emoji_zwj_sequence() {
+        // ZWJ (Zero Width Joiner) emoji sequence
+        let mut backend = AndroidBackend::new(80, 24);
+        let mut cell = Cell::default();
+        cell.set_symbol("👨‍👩‍👧"); // Family: man, woman, girl
+
+        backend.draw([(0, 0, &cell)].into_iter()).unwrap();
+
+        let drawn_cell = backend.get_cell(0, 0).unwrap();
+        assert_eq!(drawn_cell.symbol(), "👨‍👩‍👧");
+    }
+
+    #[test]
+    fn test_backend_flag_emoji() {
+        // Flag emoji (regional indicator sequence)
+        let mut backend = AndroidBackend::new(80, 24);
+        let mut cell = Cell::default();
+        cell.set_symbol("🇫🇮"); // Finnish flag
+
+        backend.draw([(0, 0, &cell)].into_iter()).unwrap();
+
+        let drawn_cell = backend.get_cell(0, 0).unwrap();
+        assert_eq!(drawn_cell.symbol(), "🇫🇮");
+    }
+
+    #[test]
+    fn test_backend_wide_cjk_characters() {
+        // CJK characters are typically double-width
+        let mut backend = AndroidBackend::new(80, 24);
+        let mut cell = Cell::default();
+        cell.set_symbol("日"); // Japanese/Chinese "sun/day"
+
+        backend.draw([(0, 0, &cell)].into_iter()).unwrap();
+
+        let drawn_cell = backend.get_cell(0, 0).unwrap();
+        assert_eq!(drawn_cell.symbol(), "日");
+    }
+
+    #[test]
+    fn test_backend_finnish_characters() {
+        // Finnish/Scandinavian special characters
+        let mut backend = AndroidBackend::new(80, 24);
+        
+        let finnish_chars = ['ä', 'ö', 'å', 'Ä', 'Ö', 'Å'];
+        
+        for (i, c) in finnish_chars.iter().enumerate() {
+            let mut cell = Cell::default();
+            cell.set_char(*c);
+            backend.draw([(i as u16, 0, &cell)].into_iter()).unwrap();
+        }
+
+        // Verify all characters are stored correctly
+        for (i, c) in finnish_chars.iter().enumerate() {
+            let drawn_cell = backend.get_cell(i as u16, 0).unwrap();
+            assert_eq!(drawn_cell.symbol(), c.to_string(), "Failed for char: {}", c);
+        }
+    }
+
+    #[test]
+    fn test_backend_box_drawing_characters() {
+        // Box drawing characters used in TUI borders
+        let mut backend = AndroidBackend::new(80, 24);
+        
+        let box_chars = ['─', '│', '┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼'];
+        
+        for (i, c) in box_chars.iter().enumerate() {
+            let mut cell = Cell::default();
+            cell.set_char(*c);
+            backend.draw([(i as u16, 0, &cell)].into_iter()).unwrap();
+        }
+
+        for (i, c) in box_chars.iter().enumerate() {
+            let drawn_cell = backend.get_cell(i as u16, 0).unwrap();
+            assert_eq!(drawn_cell.symbol(), c.to_string());
+        }
+    }
+
+    #[test]
+    fn test_backend_mixed_content() {
+        // Mix of ASCII, emoji, and wide characters
+        let mut backend = AndroidBackend::new(80, 24);
+        
+        let symbols = ["H", "e", "l", "l", "o", " ", "🌍", " ", "日", "本"];
+        
+        for (i, s) in symbols.iter().enumerate() {
+            let mut cell = Cell::default();
+            cell.set_symbol(s);
+            backend.draw([(i as u16, 0, &cell)].into_iter()).unwrap();
+        }
+
+        for (i, s) in symbols.iter().enumerate() {
+            let drawn_cell = backend.get_cell(i as u16, 0).unwrap();
+            assert_eq!(drawn_cell.symbol(), *s);
+        }
+    }
+
+    #[test]
+    fn test_backend_style_preservation_with_emoji() {
+        // Ensure style is preserved with emoji content
+        let mut backend = AndroidBackend::new(80, 24);
+        let mut cell = Cell::default();
+        cell.set_symbol("🔥");
+        cell.set_style(Style::default().fg(Color::Red).bg(Color::Yellow));
+
+        backend.draw([(0, 0, &cell)].into_iter()).unwrap();
+
+        let drawn_cell = backend.get_cell(0, 0).unwrap();
+        assert_eq!(drawn_cell.symbol(), "🔥");
+        assert_eq!(drawn_cell.fg, Color::Red);
+        assert_eq!(drawn_cell.bg, Color::Yellow);
+    }
+
+    #[test]
+    fn test_backend_cursor_with_unicode() {
+        // Test cursor positioning works with Unicode content
+        let mut backend = AndroidBackend::new(80, 24);
+        
+        backend.set_cursor_position(Position::new(5, 10)).unwrap();
+        let pos = backend.get_cursor_position().unwrap();
+        
+        assert_eq!(pos.x, 5);
+        assert_eq!(pos.y, 10);
+    }
 }
 

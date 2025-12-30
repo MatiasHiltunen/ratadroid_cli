@@ -19,7 +19,7 @@ strip = true            # Strip symbols from binary
 
 [dependencies]
 # Ratatui Android backend (local crate)
-ratatui-android = { path = "../ratatui-android", default-features = false, features = ["android-native-backend"] }
+ratatui-android = { path = "../ratatui-android", default-features = false, features = ["android-native-render"] }
 
 # Core dependencies
 ratatui = {version = "0.30", default-features = false, features = ["crossterm", "underline-color", "unstable-widget-ref"]}
@@ -39,10 +39,6 @@ anyhow = "1.0.0"
 tokio = { version = "1.39.2", features = ["macros", "rt", "signal", "tracing"] }
 
 [features]
-# Enable Android native rendering by default for best emoji/Unicode support
-default = ["android-native-backend"]
-# Enable Android native rendering via JNI (Canvas/TextPaint APIs)
-android-native-backend = ["ratatui-android/android-native-backend"]
 # Enable swash backend for emoji rendering (fallback if cosmic-text fails)
 swash-backend = ["ratatui-android/swash-backend"]
 # Enable ab_glyph backend for text rendering (fallback if cosmic-text fails)

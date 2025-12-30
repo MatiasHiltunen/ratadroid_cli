@@ -9,7 +9,7 @@
 //! - **Touch Input**: Maps touch events to terminal key events  
 //! - **On-Screen Keyboard**: Built-in virtual keyboard for special keys
 //! - **Unicode Support**: Full emoji and CJK character rendering
-//! - **Android Native Rendering**: Optional JNI-based rendering for best emoji support
+//! - **Unicode Rendering**: Full emoji and CJK character rendering via cosmic-text
 //!
 //! ## Quick Start
 //!
@@ -38,7 +38,6 @@
 //!
 //! ## Feature Flags
 //!
-//! - `android-native-backend`: Enable Android native text rendering via JNI
 //! - `swash-backend`: Enable swash for emoji fallback rendering
 //! - `ab-glyph-backend`: Enable ab_glyph for text fallback rendering
 //!
@@ -50,7 +49,7 @@
 mod backend;
 mod rasterizer;
 
-#[cfg(all(target_os = "android", feature = "android-native-backend"))]
+#[cfg(all(target_os = "android", feature = "android-native-render"))]
 mod android_render;
 
 pub mod widgets;
@@ -58,7 +57,7 @@ pub mod input;
 
 // Re-export main types
 pub use backend::AndroidBackend;
-pub use rasterizer::{Rasterizer, CachedChar, is_wide_char, warm_cache, CHAR_CACHE};
+pub use rasterizer::{Rasterizer, CachedChar, is_wide_char, is_emoji_or_special, warm_cache, CHAR_CACHE};
 
 // Re-export widget types
 pub use widgets::{
@@ -70,6 +69,9 @@ pub use widgets::{
 
 // Re-export input utilities
 pub use input::{TouchEvent, TouchAction, key_to_crossterm_event};
+
+#[cfg(target_os = "android")]
+pub use input::android_keycode_to_event;
 
 /// Configuration for the Android backend
 #[derive(Clone, Debug)]
