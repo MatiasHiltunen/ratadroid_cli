@@ -274,6 +274,34 @@ async fn async_main(android_app: AndroidApp, app: Box<dyn RatadroidApp>) -> anyh
     Ok(())
 }
 
+/// Check if a touch coordinate is within the Android native keyboard area.
+/// Returns true if the touch is in the keyboard area, false otherwise.
+fn is_touch_in_native_keyboard_area(
+    touch_y: usize,
+    window_height: usize,
+    total_height_px: u32,
+    visible_height_px: u32,
+) -> bool {
+    // If keyboard is not visible, no keyboard area exists
+    if !keyboard::is_soft_keyboard_visible() {
+        return false;
+    }
+    
+    // Calculate keyboard height from the difference between total and visible height
+    let keyboard_height = if total_height_px > visible_height_px && visible_height_px > 0 {
+        (total_height_px - visible_height_px) as usize
+    } else {
+        // Fallback: use conservative estimate (300px) if height difference is unreliable
+        300
+    };
+    
+    // Keyboard occupies the bottom portion of the screen
+    let keyboard_top_y = window_height.saturating_sub(keyboard_height);
+    
+    // Check if touch is within keyboard bounds
+    touch_y >= keyboard_top_y
+}
+
 fn process_input_event(
     state: &mut AppState,
     app: &AndroidApp,
@@ -331,6 +359,28 @@ fn process_input_event(
                         
                         keyboard_handled = true;
                         state.needs_draw = true;
+                    }
+                }
+                
+                // Check if touch is outside both keyboard areas and hide native keyboard if visible
+                if !keyboard_handled && window_height > 0 {
+                    let touch_in_direct_keyboard = touch_y >= keyboard_y;
+                    let touch_in_native_keyboard = is_touch_in_native_keyboard_area(
+                        touch_y,
+                        window_height,
+                        state.total_height_px,
+                        state.visible_height_px,
+                    );
+                    
+                    // If touch is outside both keyboard areas and native keyboard is visible, hide it
+                    if !touch_in_direct_keyboard && !touch_in_native_keyboard {
+                        if keyboard::is_soft_keyboard_visible() {
+                            info!("Touch outside keyboard areas: hiding native keyboard");
+                            // Spawn on a separate thread to avoid blocking input processing
+                            std::thread::spawn(|| {
+                                keyboard::hide_soft_keyboard();
+                            });
+                        }
                     }
                 }
             }
