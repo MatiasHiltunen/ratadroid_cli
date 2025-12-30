@@ -142,6 +142,7 @@ pub fn warm_cache(size: f32) {
 }
 
 /// Load custom font data into the global FontSystem.
+#[allow(dead_code)] // Public API, may be used by external callers
 pub fn load_font_data(data: Vec<u8>) {
     if data.len() > 100 {
         if let Ok(mut font_system) = FONT_SYSTEM.lock() {
@@ -157,12 +158,10 @@ pub fn is_emoji_or_special(c: char) -> bool {
     let code = c as u32;
     matches!(
         code,
-        0x1F300..=0x1F9FF | // Misc Symbols, Emoticons (includes emojis)
+        0x1F300..=0x1F9FF | // Misc Symbols, Emoticons (includes emojis and supplemental symbols)
         0x1FA00..=0x1FAFF | // Extended symbols
         0x2600..=0x26FF |   // Misc symbols
         0x2700..=0x27BF |   // Dingbats
-        0x1F600..=0x1F64F | // Emoticons
-        0x1F900..=0x1F9FF | // Supplemental Symbols and Pictographs
         0x1F1E0..=0x1F1FF   // Flags
     )
 }

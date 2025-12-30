@@ -5,9 +5,9 @@
 //! APIs which provide superior emoji quality.
 
 #[cfg(all(target_os = "android", feature = "android-native-render"))]
-use crate::rasterizer::{CachedChar, CHAR_CACHE, is_wide_char};
+use crate::rasterizer::{CachedChar, CHAR_CACHE};
 #[cfg(all(target_os = "android", feature = "android-native-render"))]
-use jni::objects::{JObject, JString, JByteArray};
+use jni::objects::{JObject, JByteArray};
 #[cfg(all(target_os = "android", feature = "android-native-render"))]
 use jni::sys::jobject;
 #[cfg(all(target_os = "android", feature = "android-native-render"))]
