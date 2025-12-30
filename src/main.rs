@@ -44,6 +44,53 @@ struct Cli {
     command: Commands,
 }
 
+/// Log level filter for logcat output
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum LogLevel {
+    Verbose,
+    Debug,
+    #[default]
+    Info,
+    Warn,
+    Error,
+}
+
+impl std::str::FromStr for LogLevel {
+    type Err = String;
+    
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "v" | "verbose" => Ok(LogLevel::Verbose),
+            "d" | "debug" => Ok(LogLevel::Debug),
+            "i" | "info" => Ok(LogLevel::Info),
+            "w" | "warn" | "warning" => Ok(LogLevel::Warn),
+            "e" | "error" => Ok(LogLevel::Error),
+            _ => Err(format!("Invalid log level: {}. Use: verbose, debug, info, warn, error", s)),
+        }
+    }
+}
+
+impl LogLevel {
+    fn includes(&self, other: &str) -> bool {
+        let other_level = match other {
+            "V" => 0,
+            "D" => 1,
+            "I" => 2,
+            "W" => 3,
+            "E" | "F" => 4,
+            _ => 2, // Default to info level
+        };
+        let self_level = match self {
+            LogLevel::Verbose => 0,
+            LogLevel::Debug => 1,
+            LogLevel::Info => 2,
+            LogLevel::Warn => 3,
+            LogLevel::Error => 4,
+        };
+        other_level >= self_level
+    }
+}
+
 /// Subcommands supported by the CLI.
 #[derive(Subcommand)]
 enum Commands {
@@ -80,6 +127,12 @@ enum Commands {
         /// Stream logcat output after launching the app.
         #[arg(long)]
         log: bool,
+        /// Minimum log level to display (verbose, debug, info, warn, error).
+        #[arg(long, default_value = "info")]
+        level: LogLevel,
+        /// Filter logs to only show app-related messages.
+        #[arg(long)]
+        app_only: bool,
     },
     /// Show crash logs from the last app run.
     Logs {
@@ -89,6 +142,21 @@ enum Commands {
         /// Number of lines to show.
         #[arg(long, default_value_t = 100)]
         lines: usize,
+        /// Minimum log level to display (verbose, debug, info, warn, error).
+        #[arg(long, default_value = "info")]
+        level: LogLevel,
+        /// Follow log output in real-time (like tail -f).
+        #[arg(long, short = 'f')]
+        follow: bool,
+        /// Show only crash-related logs (panics, native crashes, ANRs).
+        #[arg(long)]
+        crashes: bool,
+        /// Filter by specific tag (can be used multiple times).
+        #[arg(long, short = 't')]
+        tag: Vec<String>,
+        /// Search for specific text in log messages.
+        #[arg(long, short = 's')]
+        search: Option<String>,
     },
     /// Serve a directory of APKs and other files over HTTP.
     Serve {
