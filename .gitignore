@@ -1,1 +1,25 @@
-target
+# Rust build output
+target/
+
+# Template build artifacts
+template/build/
+template/app/build/
+template/rust/target/
+template/.gradle/
+template/local.properties
+template/app/src/main/jniLibs/
+
+# Test project build artifacts  
+test_template_app/build/
+test_template_app/app/build/
+test_template_app/rust/target/
+test_template_app/.gradle/
+test_template_app/local.properties
+test_template_app/app/src/main/jniLibs/
+
+# IDE files
+*.iml
+.idea/
+
+# OS files
+.DS_Store

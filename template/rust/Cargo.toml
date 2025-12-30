@@ -1,0 +1,48 @@
+[package]
+name = "ratadroid"
+version = "0.1.0"
+edition = "2024"
+description = "Android runtime for Ratatui TUI applications"
+license = "MIT"
+
+[lib]
+name = "ratadroid"
+crate-type = ["cdylib"]
+
+# Optimize for size in release builds
+[profile.release]
+opt-level = "z"         # Optimize for size
+lto = true              # Enable Link Time Optimization
+codegen-units = 1       # Better optimization, slower compile
+panic = "abort"         # Reduce binary size by removing unwinding
+strip = true            # Strip symbols from binary
+
+[dependencies]
+# Ratatui Android backend (local crate)
+ratatui-android = { path = "../ratatui-android", default-features = false, features = ["android-native-render"] }
+
+# Core dependencies
+ratatui = {version = "0.30", default-features = false, features = ["crossterm", "underline-color", "unstable-widget-ref"]}
+log = "0.4"
+anyhow = "1.0"
+crossterm = "0.29"
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.5", features = ["native-activity"] }
+ndk = "0.8"
+ndk-sys = "0.5"
+android_logger = "0.13"
+crossterm = "0.29"
+jni = "0.21"
+ndk-context = "0.1.1"
+anyhow = "1.0.0"
+tokio = { version = "1.39.2", features = ["macros", "rt", "signal", "tracing"] }
+
+[features]
+# Enable swash backend for emoji rendering (fallback if cosmic-text fails)
+swash-backend = ["ratatui-android/swash-backend"]
+# Enable ab_glyph backend for text rendering (fallback if cosmic-text fails)
+ab-glyph-backend = ["ratatui-android/ab-glyph-backend"]
+
+[workspace]
+

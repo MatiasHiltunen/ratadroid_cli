@@ -1,10 +1,18 @@
 [package]
 name = "ratadroid"
 version = "0.1.0"
-# Use the Rust 2024 edition to take advantage of the latest language and tooling features.
+# Use the Rust 2024 edition to take advantage of the latest language and tooling features.
 edition = "2024"
+# Include build script for template bundling
+build = "build.rs"
+
+[build-dependencies]
+# walkdir for recursive directory traversal during build
+walkdir = "2.3"
 
 [dependencies]
+# Include directory tree at compile time for template bundling
+include_dir = "0.7"
 # Clap provides a declarative CLI API with derive macros.
 clap = { version = "4.2.7", features = ["derive"] }
 # Tokio powers the asynchronous file server used by the `serve` subcommand.
@@ -21,3 +29,9 @@ dirs = "5"
 serde = { version = "1.0", features = ["derive"] }
 # serde_json for JSON handling
 serde_json = "1.0"
+# colored for terminal output formatting
+colored = "2"
+# regex for parsing logcat output
+regex = "1"
+
+[workspace]
