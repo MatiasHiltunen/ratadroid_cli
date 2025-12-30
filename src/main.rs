@@ -185,10 +185,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::New { name, path } => handle_new(name, path).await,
         Commands::Build { variant, target } => handle_gradle_build(variant, target).await,
         Commands::Install { variant } => handle_gradle_install(variant).await,
-        Commands::Run { variant, log } => handle_gradle_run(variant, log).await,
+        Commands::Run { variant, log, level, app_only } => {
+            handle_gradle_run(variant, log, level, app_only).await
+        }
         Commands::Serve { port, dir } => handle_serve(port, dir).await,
         Commands::Doctor { fix } => handle_doctor(fix).await,
-        Commands::Logs { package, lines } => handle_logs(package, lines).await,
+        Commands::Logs { package, lines, level, follow, crashes, tag, search } => {
+            handle_logs(package, lines, level, follow, crashes, tag, search).await
+        }
         Commands::Devices => handle_devices().await,
     }
 }
@@ -222,21 +226,161 @@ mod log {
     }
 }
 
-/// Streams Android logcat output with colored formatting
-async fn stream_logcat_output(adb: &str, device_id: Option<&str>, package_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+/// Configuration for logcat streaming
+struct LogcatConfig<'a> {
+    adb: &'a str,
+    device_id: Option<&'a str>,
+    package_name: &'a str,
+    level: LogLevel,
+    app_only: bool,
+    tags: &'a [String],
+    search: Option<&'a str>,
+    crashes_only: bool,
+}
+
+/// Detects if a log line indicates a Rust panic
+fn is_rust_panic(tag: &str, message: &str) -> bool {
+    tag.contains("RustStdoutStderr") ||
+    message.contains("panicked at") ||
+    (message.contains("thread '") && message.contains("' panicked")) ||
+    message.contains("RUST_BACKTRACE") ||
+    message.contains("stack backtrace:")
+}
+
+/// Detects if a log line indicates a native crash
+fn is_native_crash(tag: &str, message: &str) -> bool {
+    (tag == "DEBUG" && (message.contains("signal") || message.contains("fault addr"))) ||
+    (tag == "libc" && message.contains("Fatal signal")) ||
+    tag.contains("tombstone") ||
+    tag == "crash_dump" ||
+    message.contains("SIGABRT") ||
+    message.contains("SIGSEGV") ||
+    message.contains("SIGFPE") ||
+    message.contains("SIGBUS")
+}
+
+/// Detects if a log line indicates an ANR (Application Not Responding)
+fn is_anr(tag: &str, message: &str) -> bool {
+    (tag == "ActivityManager" && message.contains("ANR in")) ||
+    tag == "ANRManager" ||
+    message.contains("Application Not Responding")
+}
+
+/// Formats a parsed log line with beautiful colors
+fn format_log_line(
+    timestamp: &str,
+    level: &str,
+    tag: &str,
+    message: &str,
+    package_name: &str,
+) {
+    let is_app_tag = tag.contains("ratadroid") || 
+                     tag.contains("NativeActivity") || 
+                     tag.contains(package_name) ||
+                     tag.contains("RustStdoutStderr");
+    
+    let is_panic = is_rust_panic(tag, message);
+    let is_crash = is_native_crash(tag, message);
+    let is_anr_line = is_anr(tag, message);
+    
+    // Special formatting for crashes and panics
+    if is_panic {
+        println!("{}", "┌─────────────────────────────────────────────────────────────────────────────".bright_red());
+        println!("{} {} {}", 
+            "│".bright_red(),
+            "🦀 RUST PANIC".bright_red().bold(),
+            timestamp.bright_black()
+        );
+        println!("{} {}: {}", 
+            "│".bright_red(),
+            tag.bright_red().bold(),
+            message.bright_white()
+        );
+        return;
+    }
+    
+    if is_crash {
+        println!("{}", "┌─────────────────────────────────────────────────────────────────────────────".bright_red());
+        println!("{} {} {}", 
+            "│".bright_red(),
+            "💥 NATIVE CRASH".bright_red().bold(),
+            timestamp.bright_black()
+        );
+        println!("{} {}: {}", 
+            "│".bright_red(),
+            tag.bright_red().bold(),
+            message.bright_white()
+        );
+        return;
+    }
+    
+    if is_anr_line {
+        println!("{}", "┌─────────────────────────────────────────────────────────────────────────────".bright_yellow());
+        println!("{} {} {}", 
+            "│".bright_yellow(),
+            "⏳ ANR DETECTED".bright_yellow().bold(),
+            timestamp.bright_black()
+        );
+        println!("{} {}: {}", 
+            "│".bright_yellow(),
+            tag.bright_yellow().bold(),
+            message.bright_white()
+        );
+        return;
+    }
+    
+    // Level badge with fixed width
+    let level_badge = match level {
+        "V" => " V ".on_bright_black().black(),
+        "D" => " D ".on_blue().white(),
+        "I" => " I ".on_green().white(),
+        "W" => " W ".on_yellow().black(),
+        "E" => " E ".on_red().white(),
+        "F" => " F ".on_red().white().bold(),
+        _ => format!(" {} ", level).on_white().black(),
+    };
+    
+    // Tag formatting - highlight app-related tags
+    let tag_formatted = if is_app_tag {
+        format!("{}", tag.bright_cyan().bold())
+    } else {
+        format!("{}", tag.bright_black())
+    };
+    
+    // Message formatting - highlight important keywords
+    let message_formatted = if message.contains("Error") || message.contains("error") ||
+                               message.contains("Exception") || message.contains("FAILED") {
+        format!("{}", message.bright_red())
+    } else if message.contains("Warning") || message.contains("warning") {
+        format!("{}", message.bright_yellow())
+    } else if is_app_tag {
+        format!("{}", message.bright_white())
+    } else {
+        format!("{}", message.white())
+    };
+    
+    println!("{} {} {} {}", 
+        timestamp.bright_black(),
+        level_badge,
+        tag_formatted,
+        message_formatted
+    );
+}
+
+/// Streams Android logcat output with beautiful colored formatting
+async fn stream_logcat_output(config: &LogcatConfig<'_>) -> Result<(), Box<dyn std::error::Error>> {
     use tokio::process::Command as TokioCommand;
     
-    let mut cmd = TokioCommand::new(adb);
+    let mut cmd = TokioCommand::new(config.adb);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::null());
     
-    if let Some(id) = device_id {
+    if let Some(id) = config.device_id {
         cmd.args(["-s", id]);
     }
     
-    // Filter logcat to show relevant tags (package name and AndroidRuntime errors)
-    // Format: -v time shows timestamps
-    cmd.args(["logcat", "-v", "time"]);
+    // Use threadtime format for more detailed output
+    cmd.args(["logcat", "-v", "threadtime"]);
     
     let mut child = cmd.spawn()?;
     
@@ -246,55 +390,105 @@ async fn stream_logcat_output(adb: &str, device_id: Option<&str>, package_name: 
     let mut reader = BufReader::new(stdout);
     let mut line = String::new();
     
-    // Regex to parse logcat lines: "MM-DD HH:MM:SS.mmm  PID  TID LEVEL TAG: Message"
+    // Regex for threadtime format: "MM-DD HH:MM:SS.mmm  PID  TID LEVEL TAG: Message"
     let log_regex = Regex::new(r"(\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\s+(\d+)\s+(\d+)\s+([VDIWEF])\s+([^:]+):\s*(.*)")?;
     
-    log::header("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    log::header("📱 ANDROID LOGCAT (Press Ctrl+C to stop)");
-    log::header("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    // Print header
+    println!();
+    println!("{}", "━".repeat(80).bright_cyan());
+    println!("{}", "  📱 ANDROID LOGCAT".bright_cyan().bold());
+    println!("{}", format!("  Package: {}", config.package_name).bright_cyan());
+    println!("{}", format!("  Level: {:?} | App Only: {} | Press Ctrl+C to stop", 
+        config.level, config.app_only).bright_black());
+    println!("{}", "━".repeat(80).bright_cyan());
+    println!();
+    
+    // Track if we're in a multi-line crash/panic block
+    let mut in_crash_block = false;
+    let mut crash_block_lines = 0;
     
     loop {
         line.clear();
         match reader.read_line(&mut line).await {
             Ok(0) => break, // EOF
             Ok(_) => {
-                let line = line.trim();
-                if line.is_empty() {
+                let line_content = line.trim();
+                if line_content.is_empty() {
                     continue;
                 }
                 
-                // Try to parse and colorize the log line
-                if let Some(caps) = log_regex.captures(line) {
+                // Try to parse the log line
+                if let Some(caps) = log_regex.captures(line_content) {
                     let timestamp = caps.get(1).map(|m| m.as_str()).unwrap_or("");
                     let level = caps.get(4).map(|m| m.as_str()).unwrap_or("");
-                    let tag = caps.get(5).map(|m| m.as_str()).unwrap_or("");
+                    let tag = caps.get(5).map(|m| m.as_str()).unwrap_or("").trim();
                     let message = caps.get(6).map(|m| m.as_str()).unwrap_or("");
                     
-                    let level_color = match level {
-                        "V" => "VERBOSE".bright_black(),
-                        "D" => "DEBUG".bright_blue(),
-                        "I" => "INFO".bright_green(),
-                        "W" => "WARN".bright_yellow(),
-                        "E" => "ERROR".bright_red(),
-                        "F" => "FATAL".bright_red().bold(),
-                        _ => level.bright_white(),
-                    };
+                    // Check for crash block start/end
+                    let is_crash = is_rust_panic(tag, message) || is_native_crash(tag, message) || is_anr(tag, message);
+                    if is_crash {
+                        in_crash_block = true;
+                        crash_block_lines = 0;
+                    } else if in_crash_block {
+                        crash_block_lines += 1;
+                        // End crash block after a few non-crash lines
+                        if crash_block_lines > 5 {
+                            println!("{}", "└─────────────────────────────────────────────────────────────────────────────".bright_red());
+                            in_crash_block = false;
+                        }
+                    }
                     
-                    let tag_color = if tag.contains("ratadroid") || tag.contains("NativeActivity") || tag.contains(package_name) {
-                        tag.bright_cyan().bold()
+                    // Apply level filter
+                    if !config.level.includes(level) {
+                        continue;
+                    }
+                    
+                    // Apply crashes only filter
+                    if config.crashes_only && !is_crash && !in_crash_block {
+                        continue;
+                    }
+                    
+                    // Apply app-only filter
+                    let is_app_tag = tag.contains("ratadroid") || 
+                                     tag.contains("NativeActivity") || 
+                                     tag.contains(config.package_name) ||
+                                     tag.contains("RustStdoutStderr") ||
+                                     tag == "AndroidRuntime";
+                    
+                    if config.app_only && !is_app_tag && !is_crash && !in_crash_block {
+                        continue;
+                    }
+                    
+                    // Apply tag filter
+                    if !config.tags.is_empty() {
+                        let tag_matches = config.tags.iter().any(|t| tag.contains(t.as_str()));
+                        if !tag_matches && !is_crash && !in_crash_block {
+                            continue;
+                        }
+                    }
+                    
+                    // Apply search filter
+                    if let Some(search) = config.search {
+                        if !message.to_lowercase().contains(&search.to_lowercase()) &&
+                           !tag.to_lowercase().contains(&search.to_lowercase()) {
+                            continue;
+                        }
+                    }
+                    
+                    // Format and print the log line
+                    if in_crash_block && !is_crash {
+                        // Continue crash block formatting
+                        println!("{} {}", "│".bright_red(), message);
                     } else {
-                        tag.bright_white()
-                    };
-                    
-                    println!("{} {} {}: {}", 
-                        timestamp.bright_black(),
-                        level_color,
-                        tag_color,
-                        message.bright_white()
-                    );
+                        format_log_line(timestamp, level, tag, message, config.package_name);
+                    }
                 } else {
-                    // Fallback: just print the line
-                    println!("{}", line.bright_white());
+                    // Continuation line (no timestamp) - might be part of a stack trace
+                    if in_crash_block {
+                        println!("{} {}", "│".bright_red(), line_content);
+                    } else if !config.app_only {
+                        println!("  {}", line_content.bright_black());
+                    }
                 }
             }
             Err(e) => {
@@ -1242,7 +1436,12 @@ async fn handle_gradle_install(variant: String) -> Result<(), Box<dyn std::error
 }
 
 /// Runs the app on a connected device or emulator.
-async fn handle_gradle_run(variant: String, stream_logcat: bool) -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_gradle_run(
+    variant: String,
+    stream_logcat: bool,
+    level: LogLevel,
+    app_only: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let project_dir = env::current_dir()?;
     log::step(&format!("Running app (variant: {})...", variant));
     
@@ -1284,18 +1483,33 @@ async fn handle_gradle_run(variant: String, stream_logcat: bool) -> Result<(), B
             // Stream logcat output only if --log flag is set
             if stream_logcat {
                 // Clear logcat buffer and start streaming
-                let _ = Command::new(&adb)
-                    .args(device_id_str.as_ref().map(|id| vec!["-s", id]).unwrap_or_default())
-                    .args(["logcat", "-c"])
-                    .status();
+                let mut clear_cmd = Command::new(&adb);
+                if let Some(ref id) = device_id_str {
+                    clear_cmd.args(["-s", id]);
+                }
+                clear_cmd.args(["logcat", "-c"]);
+                let _ = clear_cmd.status();
                 
-                // Stream logcat output
-                log::info("\nStarting logcat stream...");
-                if let Err(e) = stream_logcat_output(&adb, device_id_str.as_deref(), &package_name).await {
+                // Stream logcat output with config
+                let tags = Vec::new();
+                let config = LogcatConfig {
+                    adb: &adb,
+                    device_id: device_id_str.as_deref(),
+                    package_name: &package_name,
+                    level,
+                    app_only,
+                    tags: &tags,
+                    search: None,
+                    crashes_only: false,
+                };
+                
+                if let Err(e) = stream_logcat_output(&config).await {
                     log::warning(&format!("Logcat stream ended: {}", e));
                 }
             } else {
                 log::info("\n💡 Tip: Use 'ratadroid run --log' to stream logcat output");
+                log::info("         Use 'ratadroid run --log --app-only' for app-only logs");
+                log::info("         Use 'ratadroid run --log --level debug' for more verbose logs");
             }
         },
         Ok(_) => {
@@ -1312,8 +1526,55 @@ async fn handle_gradle_run(variant: String, stream_logcat: bool) -> Result<(), B
     Ok(())
 }
 
-/// Shows crash logs and error messages from the app.
-async fn handle_logs(package: Option<String>, lines: usize) -> Result<(), Box<dyn std::error::Error>> {
+/// Parsed log entry for structured processing
+struct LogEntry {
+    timestamp: String,
+    level: String,
+    tag: String,
+    message: String,
+    is_crash: bool,
+    is_panic: bool,
+    is_anr: bool,
+}
+
+impl LogEntry {
+    fn parse(line: &str, log_regex: &Regex) -> Option<Self> {
+        let caps = log_regex.captures(line)?;
+        let timestamp = caps.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+        let level = caps.get(4).map(|m| m.as_str()).unwrap_or("").to_string();
+        let tag = caps.get(5).map(|m| m.as_str()).unwrap_or("").trim().to_string();
+        let message = caps.get(6).map(|m| m.as_str()).unwrap_or("").to_string();
+        
+        let is_panic = is_rust_panic(&tag, &message);
+        let is_crash = is_native_crash(&tag, &message);
+        let is_anr = is_anr(&tag, &message);
+        
+        Some(LogEntry {
+            timestamp,
+            level,
+            tag,
+            message,
+            is_crash,
+            is_panic,
+            is_anr,
+        })
+    }
+    
+    fn print_formatted(&self, package_name: &str) {
+        format_log_line(&self.timestamp, &self.level, &self.tag, &self.message, package_name);
+    }
+}
+
+/// Shows crash logs and error messages from the app with advanced filtering.
+async fn handle_logs(
+    package: Option<String>,
+    lines: usize,
+    level: LogLevel,
+    follow: bool,
+    crashes_only: bool,
+    tags: Vec<String>,
+    search: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let package_name = if let Some(pkg) = package {
         pkg
     } else {
@@ -1328,77 +1589,157 @@ async fn handle_logs(package: Option<String>, lines: usize) -> Result<(), Box<dy
     let adb = find_adb()
         .ok_or("adb not found. Make sure Android SDK platform-tools is installed and accessible.")?;
     
-    println!("Fetching logs for package: {}\n", package_name);
-    println!("{}", "═".repeat(80));
-    println!("CRASH LOGS & ERRORS");
-    println!("{}", "═".repeat(80));
-    println!();
+    // Get device ID
+    let device = get_preferred_device(&adb);
+    let device_id = device.as_ref().map(|d| d.id.as_str());
     
-    // Get AndroidRuntime crashes
-    let runtime_output = Command::new(&adb)
-        .args(["logcat", "-d", "-s", "AndroidRuntime:E"])
-        .output()?;
-    
-    if runtime_output.status.success() {
-        let runtime_logs = String::from_utf8_lossy(&runtime_output.stdout);
-        if !runtime_logs.trim().is_empty() {
-            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            println!("ANDROID RUNTIME CRASHES:");
-            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            for line in runtime_logs.lines().take(lines) {
-                if line.contains(&package_name) || line.contains("FATAL") || line.contains("Exception") {
-                    println!("{}", line);
-                }
-            }
-            println!();
-        }
-    }
-    
-    // Get app-specific logs
-    let app_output = Command::new(&adb)
-        .args(["logcat", "-d", "-s", &format!("{}:*", package_name)])
-        .output()?;
-    
-    if app_output.status.success() {
-        let app_logs = String::from_utf8_lossy(&app_output.stdout);
-        if !app_logs.trim().is_empty() {
-            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            println!("APP LOGS:");
-            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            for line in app_logs.lines().take(lines) {
-                println!("{}", line);
-            }
-            println!();
-        }
-    }
-    
-    // Get general errors
-    let error_output = Command::new(&adb)
-        .args(["logcat", "-d", "-s", "*:E"])
-        .output()?;
-    
-    if error_output.status.success() {
-        let error_logs = String::from_utf8_lossy(&error_output.stdout);
-        let relevant_errors: Vec<&str> = error_logs
-            .lines()
-            .filter(|line| line.contains(&package_name))
-            .take(lines)
-            .collect();
+    // If follow mode, stream logs
+    if follow {
+        let config = LogcatConfig {
+            adb: &adb,
+            device_id,
+            package_name: &package_name,
+            level,
+            app_only: true, // Default to app-only in follow mode
+            tags: &tags,
+            search: search.as_deref(),
+            crashes_only,
+        };
         
-        if !relevant_errors.is_empty() {
-            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            println!("ERROR LOGS:");
-            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            for line in relevant_errors {
-                println!("{}", line);
+        return stream_logcat_output(&config).await;
+    }
+    
+    // Static log display
+    let log_regex = Regex::new(r"(\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\s+(\d+)\s+(\d+)\s+([VDIWEF])\s+([^:]+):\s*(.*)")?;
+    
+    // Print header
+    println!();
+    println!("{}", "━".repeat(80).bright_cyan());
+    println!("{}", "  📋 RATADROID LOG VIEWER".bright_cyan().bold());
+    println!("{}", format!("  Package: {}", package_name).bright_cyan());
+    if let Some(ref d) = device {
+        println!("{}", format!("  Device: {} ({})", d.model, d.id).bright_black());
+    }
+    println!("{}", format!("  Level: {:?} | Lines: {} | Crashes only: {}", level, lines, crashes_only).bright_black());
+    if !tags.is_empty() {
+        println!("{}", format!("  Tags: {}", tags.join(", ")).bright_black());
+    }
+    if let Some(ref s) = search {
+        println!("{}", format!("  Search: \"{}\"", s).bright_black());
+    }
+    println!("{}", "━".repeat(80).bright_cyan());
+    println!();
+    
+    // Collect all logs first
+    let mut all_entries: Vec<LogEntry> = Vec::new();
+    
+    // Fetch logs with threadtime format
+    let mut logcat_cmd = Command::new(&adb);
+    if let Some(id) = device_id {
+        logcat_cmd.args(["-s", id]);
+    }
+    logcat_cmd.args(["logcat", "-d", "-v", "threadtime"]);
+    
+    let output = logcat_cmd.output()?;
+    
+    if output.status.success() {
+        let logs = String::from_utf8_lossy(&output.stdout);
+        
+        for line in logs.lines() {
+            if let Some(entry) = LogEntry::parse(line, &log_regex) {
+                // Apply level filter
+                if !level.includes(&entry.level) {
+                    continue;
+                }
+                
+                // Check if it's app-related or a crash
+                let is_app_related = entry.tag.contains("ratadroid") ||
+                                     entry.tag.contains("NativeActivity") ||
+                                     entry.tag.contains(&package_name) ||
+                                     entry.tag.contains("RustStdoutStderr") ||
+                                     entry.tag == "AndroidRuntime" ||
+                                     entry.message.contains(&package_name);
+                
+                let is_any_crash = entry.is_crash || entry.is_panic || entry.is_anr;
+                
+                // Apply crashes only filter
+                if crashes_only && !is_any_crash {
+                    continue;
+                }
+                
+                // Filter to app-related logs unless it's a crash
+                if !is_app_related && !is_any_crash {
+                    continue;
+                }
+                
+                // Apply tag filter
+                if !tags.is_empty() {
+                    let tag_matches = tags.iter().any(|t| entry.tag.contains(t.as_str()));
+                    if !tag_matches && !is_any_crash {
+                        continue;
+                    }
+                }
+                
+                // Apply search filter
+                if let Some(ref s) = search {
+                    let search_lower = s.to_lowercase();
+                    if !entry.message.to_lowercase().contains(&search_lower) &&
+                       !entry.tag.to_lowercase().contains(&search_lower) {
+                        continue;
+                    }
+                }
+                
+                all_entries.push(entry);
             }
         }
     }
     
+    // Show summary
+    let total_count = all_entries.len();
+    let crash_count = all_entries.iter().filter(|e| e.is_crash).count();
+    let panic_count = all_entries.iter().filter(|e| e.is_panic).count();
+    let anr_count = all_entries.iter().filter(|e| e.is_anr).count();
+    
+    if crash_count > 0 || panic_count > 0 || anr_count > 0 {
+        println!("{}", "┌─────────────────────────────────────────────────────────────────────────────".bright_red());
+        println!("{} {} {}", 
+            "│".bright_red(),
+            "⚠️  ISSUES DETECTED".bright_red().bold(),
+            format!("(Crashes: {}, Panics: {}, ANRs: {})", crash_count, panic_count, anr_count).bright_red()
+        );
+        println!("{}", "└─────────────────────────────────────────────────────────────────────────────".bright_red());
+        println!();
+    }
+    
+    // Display the last N entries
+    let display_entries: Vec<_> = all_entries.iter().rev().take(lines).collect::<Vec<_>>().into_iter().rev().collect();
+    
+    if display_entries.is_empty() {
+        println!("{}", "No matching log entries found.".bright_yellow());
+        println!();
+        println!("Tips:");
+        println!("  • Run your app first: {}", "ratadroid run".bright_cyan());
+        println!("  • Try different filters: {}", "ratadroid logs --level debug".bright_cyan());
+        println!("  • Follow logs in real-time: {}", "ratadroid logs -f".bright_cyan());
+    } else {
+        println!("{}", format!("Showing {} of {} matching entries:", display_entries.len(), total_count).bright_black());
+        println!();
+        
+        for entry in display_entries {
+            entry.print_formatted(&package_name);
+        }
+    }
+    
+    // Print footer with tips
     println!();
-    println!("{}", "═".repeat(80));
-    println!("Tip: Use 'adb logcat -c' to clear logs, or 'ratadroid logs --lines 200' for more");
-    println!("{}", "═".repeat(80));
+    println!("{}", "━".repeat(80).bright_cyan());
+    println!("{}", "  💡 Tips:".bright_cyan());
+    println!("{}", "     • Follow logs in real-time: ratadroid logs -f".bright_black());
+    println!("{}", "     • Show only crashes: ratadroid logs --crashes".bright_black());
+    println!("{}", "     • Search for text: ratadroid logs -s \"error\"".bright_black());
+    println!("{}", "     • Filter by tag: ratadroid logs -t Lifecycle -t Input".bright_black());
+    println!("{}", "     • Clear logcat: adb logcat -c".bright_black());
+    println!("{}", "━".repeat(80).bright_cyan());
     
     Ok(())
 }
